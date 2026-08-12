@@ -1,0 +1,147 @@
+"""NSF-HiFiGAN (mini_nsf) checkpoint -> GGUF converter.
+
+Architecture (modules/nsf_hifigan/models.py Generator, mini_nsf=True):
+  source = fastsinegen(f0)  [libmininsf host-side; not stored in GGUF]
+  x = conv_pre(Conv1d 128->512 k7 p3)
+  for i in 5 ups (rates [8,8,2,2,2], kernels [16,16,4,4,4]):
+      x = LReLU(x); x = ups[i](ConvTranspose1d); if i==1: x += source_conv(source)
+      x = mean(resblocks[i*3..i*3+2](x))          # ResBlock1: 3x dilated Conv1d pairs
+  x = LReLU(x); x = conv_post(Conv1d 16->1 k7 p3); x = tanh(x)
+
+Tensor layout matches ggml conv ops (gguf-py reverses the numpy shape list
+into ggml ne order, so ne0 = K = the last numpy dim):
+  convs   Conv1d [OC,IC,K]        -> ggml kernel [K,IC,OC]      (ne0=K)
+  ups     ConvTranspose1d [Cin,Cout,K] -> ggml kernel [K,Cout,Cin]
+  source  Conv1d 1->256 k1        -> [1,1,256]
+
+Quantization: this component is NOT quantized (per decision).  The converter
+offers F32 (exact golden) and F16 (default, matches what the engine targets);
+a future fp16-trained checkpoint keeps the same interface.
+
+Only third-party deps are torch + gguf (Python package) + numpy.
+"""
+import argparse
+import json
+import os
+
+import numpy as np
+import torch
+
+from gguf import GGUFWriter
+from gguf.constants import GGMLQuantizationType as QT
+
+
+def materialize_weight_norm(sd: dict):
+    """hifigan stores weight_norm as (weight_g, weight_v); synthesize weight = g * v/||v||."""
+    keys = list(sd.keys())
+    for k in keys:
+        if k.endswith(".weight_g"):
+            base = k[: -len("weight_g")]
+            vk = base + "weight_v"
+            if vk not in sd:
+                continue
+            g = sd[k].numpy().astype(np.float32)
+            v = sd[vk].numpy().astype(np.float32)
+            axes = tuple(range(1, v.ndim))
+            norm = np.sqrt((v ** 2).sum(axis=axes, keepdims=True)) + 1e-12
+            sd[base + "weight"] = torch.from_numpy((g * (v / norm)).astype(np.float32))
+            del sd[k]
+            del sd[vk]
+    return True
+
+
+def conv1d_to_ggml(w: np.ndarray) -> np.ndarray:
+    """PyTorch Conv1d [OC, IC, K] stored RAW (file ne0 = K last, matching
+    ggml_conv_1d's [K, IC, OC] kernel layout)."""
+    return np.ascontiguousarray(w, dtype=np.float32)
+
+
+def convt1d_to_ggml(w: np.ndarray) -> np.ndarray:
+    """PyTorch ConvTranspose1d [Cin, Cout, K] stored RAW (file ne0 = K,
+    matching ggml_conv_transpose_1d's [K, Cout, Cin] layout)."""
+    return np.ascontiguousarray(w, dtype=np.float32)
+
+
+def write_gguf(path: str, arch: str, tensors: dict, meta: dict, dtype: str):
+    writer = GGUFWriter(path, arch)
+    for k, v in meta.items():
+        if isinstance(v, str):
+            writer.add_string(k, v)
+        elif isinstance(v, bool):
+            writer.add_bool(k, v)
+        elif isinstance(v, int):
+            writer.add_int32(k, v)
+        elif isinstance(v, float):
+            writer.add_float32(k, v)
+        elif isinstance(v, (list, tuple)):
+            writer.add_array(k, [float(x) for x in v])
+    for name in sorted(tensors.keys()):
+        w = tensors[name]
+        if dtype == "F16":
+            writer.add_tensor(name, w.astype(np.float16), raw_dtype=QT.F16)
+        else:
+            writer.add_tensor(name, w.astype(np.float32), raw_dtype=QT.F32)
+    writer.write_header_to_file()
+    writer.write_kv_data_to_file()
+    writer.write_tensors_to_file()
+    writer.close()
+
+
+def main():
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--ckpt", required=True, help="model.ckpt path")
+    ap.add_argument("--config", required=True, help="config.json path")
+    ap.add_argument("--out", required=True, help="output .gguf path")
+    ap.add_argument("--dtype", default="F16", choices=["F16", "F32"],
+                    help="kernel dtype (F16 = fp16 interface; F32 = debug/golden)")
+    args = ap.parse_args()
+
+    ckpt_dir = os.path.dirname(args.ckpt)
+    cfg = json.load(open(args.config))
+    obj = torch.load(args.ckpt, map_location="cpu", weights_only=False)
+    sd = dict(obj["generator"])
+    print("loading", ckpt_dir)
+
+    materialize_weight_norm(sd)
+    sd = {k: (v.numpy() if hasattr(v, "numpy") else v) for k, v in sd.items()}
+
+    tensors = {}
+    for k in sorted(sd.keys()):
+        w = sd[k]
+        if k.endswith("num_batches_tracked"):
+            continue
+        if k.endswith(".weight"):
+            if k.startswith("ups."):
+                tensors["hifigan." + k] = convt1d_to_ggml(w)   # [K,Cout,Cin]
+            else:
+                tensors["hifigan." + k] = conv1d_to_ggml(w)    # [K,IC,OC]
+        elif k.endswith(".bias"):
+            tensors["hifigan." + k] = np.ascontiguousarray(w, dtype=np.float32)
+        else:
+            raise RuntimeError(f"unhandled key {k} {w.shape}")
+
+    meta = {
+        "audio.type": "hifigan",
+        "audio.sample_rate": cfg["sampling_rate"],
+        "audio.hop": cfg["hop_size"],
+        "audio.n_mels": cfg["num_mels"],
+        "hifigan.num_upsamples": len(cfg["upsample_rates"]),
+        "hifigan.num_resblocks": 3 * len(cfg["upsample_rates"]),
+        "hifigan.upsample_initial_channel": cfg["upsample_initial_channel"],
+        "hifigan.upsample_rates": [float(x) for x in cfg["upsample_rates"]],
+        "hifigan.upsample_kernels": [float(x) for x in cfg["upsample_kernel_sizes"]],
+        "hifigan.resblock_kernels": [float(x) for x in cfg["resblock_kernel_sizes"]],
+        "hifigan.resblock_dilations": [float(x) for x in cfg["resblock_dilation_sizes"][0]],
+        "hifigan.mini_nsf": bool(cfg.get("mini_nsf", True)),
+        "hifigan.noise_sigma": float(cfg.get("noise_sigma", 0.0)),
+        "hifigan.lrelu_slope": 0.1,
+        "hifigan.source_sr": float(cfg["sampling_rate"] / np.prod(cfg["upsample_rates"][2:])),
+        "hifigan.upp": int(np.prod(cfg["upsample_rates"][:2])),
+    }
+    write_gguf(args.out, "hifigan", tensors, meta, args.dtype)
+    size = os.path.getsize(args.out)
+    print(f"wrote {args.out}: {size/1e6:.2f} MB ({args.dtype})")
+
+
+if __name__ == "__main__":
+    main()

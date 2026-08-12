@@ -1,0 +1,139 @@
+cmake_minimum_required(VERSION 3.18)
+project(pc_nsf_hifigan
+    VERSION 0.1.0
+    DESCRIPTION "NSF-HiFiGAN (mini_nsf) native ggml inference engine"
+    LANGUAGES C CXX)
+
+# -----------------------------------------------------------------------------
+# Options
+# -----------------------------------------------------------------------------
+option(PCNSF_CUDA  "Enable ggml CUDA backend"  OFF)
+option(PCNSF_VULKAN "Enable ggml Vulkan backend" OFF)
+option(PCNSF_BUILD_CLI    "Build hifigan_cli executable" ON)
+option(PCNSF_BUILD_TESTS  "Build C++ tests"              ON)
+option(PCNSF_BUILD_EXAMPLES "Build external consumer example" OFF)
+
+# On Apple, default to Metal backend on. Use PCNSF_METAL to override.
+if(APPLE)
+    option(PCNSF_METAL "Enable ggml Metal backend" ON)
+else()
+    option(PCNSF_METAL "Enable ggml Metal backend" OFF)
+endif()
+
+# -----------------------------------------------------------------------------
+# Global settings
+# -----------------------------------------------------------------------------
+set(CMAKE_CXX_STANDARD 17)
+set(CMAKE_CXX_STANDARD_REQUIRED ON)
+set(CMAKE_CXX_EXTENSIONS OFF)
+set(CMAKE_POSITION_INDEPENDENT_CODE ON)
+
+if(NOT CMAKE_BUILD_TYPE AND NOT CMAKE_CONFIGURATION_TYPES)
+    set(CMAKE_BUILD_TYPE Release CACHE STRING "Build type" FORCE)
+endif()
+
+set(CMAKE_RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin")
+set(CMAKE_LIBRARY_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin")
+set(CMAKE_ARCHIVE_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/lib")
+if(MSVC)
+    foreach(_cfg IN ITEMS Debug Release RelWithDebInfo MinSizeRel)
+        string(TOUPPER "${_cfg}" _CFG)
+        set(CMAKE_RUNTIME_OUTPUT_DIRECTORY_${_CFG} "${CMAKE_BINARY_DIR}/bin")
+        set(CMAKE_LIBRARY_OUTPUT_DIRECTORY_${_CFG} "${CMAKE_BINARY_DIR}/bin")
+        set(CMAKE_ARCHIVE_OUTPUT_DIRECTORY_${_CFG} "${CMAKE_BINARY_DIR}/lib")
+    endforeach()
+    add_compile_options(/utf-8)
+endif()
+
+if(MSVC)
+    set(PCNSF_WARN_FLAGS /W3 /wd4244 /wd4267 /wd4996)
+else()
+    set(PCNSF_WARN_FLAGS -Wall -Wextra -Wno-unused-parameter)
+endif()
+
+# -----------------------------------------------------------------------------
+# Dependencies (all via FetchContent)
+# -----------------------------------------------------------------------------
+include(${CMAKE_CURRENT_SOURCE_DIR}/cmake/Dependencies.cmake)
+
+# -----------------------------------------------------------------------------
+# Core library: pc_nsf_hifigan
+# -----------------------------------------------------------------------------
+set(PCNSF_CORE_SOURCES
+    src/gguf_model.cpp
+    src/mel.cpp
+    src/hifigan.cpp
+)
+
+add_library(pc_nsf_hifigan STATIC ${PCNSF_CORE_SOURCES})
+add_library(pc_nsf_hifigan::pc_nsf_hifigan ALIAS pc_nsf_hifigan)
+
+target_include_directories(pc_nsf_hifigan
+    PUBLIC
+        $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
+        $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/third_party>
+    PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}/src
+)
+
+target_link_libraries(pc_nsf_hifigan
+    PUBLIC  ggml mininsf::mininsf
+)
+target_link_libraries(pc_nsf_hifigan PRIVATE pocketfft)
+if(MINGW AND CMAKE_CXX_COMPILER_VERSION VERSION_LESS 9)
+    # gcc<9 needs the separate std::filesystem runtime on MinGW
+    target_link_libraries(pc_nsf_hifigan PUBLIC stdc++fs)
+endif()
+
+target_compile_options(pc_nsf_hifigan PRIVATE ${PCNSF_WARN_FLAGS})
+target_compile_definitions(pc_nsf_hifigan PUBLIC
+    PCNSF_VERSION_MAJOR=${PROJECT_VERSION_MAJOR}
+    PCNSF_VERSION_MINOR=${PROJECT_VERSION_MINOR}
+    PCNSF_VERSION_PATCH=${PROJECT_VERSION_PATCH}
+)
+
+# -----------------------------------------------------------------------------
+# CLI
+# -----------------------------------------------------------------------------
+if(PCNSF_BUILD_CLI)
+    add_executable(hifigan_cli tools/hifigan_cli.cpp)
+    target_link_libraries(hifigan_cli PRIVATE pc_nsf_hifigan::pc_nsf_hifigan dr_wav)
+    target_compile_options(hifigan_cli PRIVATE ${PCNSF_WARN_FLAGS})
+endif()
+
+# -----------------------------------------------------------------------------
+# Tests
+# -----------------------------------------------------------------------------
+if(PCNSF_BUILD_TESTS)
+    enable_testing()
+    add_subdirectory(tests)
+endif()
+
+# -----------------------------------------------------------------------------
+# Examples
+# -----------------------------------------------------------------------------
+if(PCNSF_BUILD_EXAMPLES)
+    add_subdirectory(examples)
+endif()
+
+# -----------------------------------------------------------------------------
+# Install
+# -----------------------------------------------------------------------------
+install(DIRECTORY include/pc_nsf_hifigan
+        DESTINATION include
+        FILES_MATCHING PATTERN "*.h")
+
+install(TARGETS pc_nsf_hifigan
+        EXPORT pc_nsf_hifigan-targets
+        ARCHIVE DESTINATION lib
+        LIBRARY DESTINATION lib
+        RUNTIME DESTINATION bin)
+
+message(STATUS "")
+message(STATUS "pc_nsf_hifigan ${PROJECT_VERSION} configuration:")
+message(STATUS "  Metal .............. ${PCNSF_METAL}")
+message(STATUS "  CUDA ............... ${PCNSF_CUDA}")
+message(STATUS "  Vulkan ............. ${PCNSF_VULKAN}")
+message(STATUS "  Build CLI .......... ${PCNSF_BUILD_CLI}")
+message(STATUS "  Build Tests ........ ${PCNSF_BUILD_TESTS}")
+message(STATUS "")

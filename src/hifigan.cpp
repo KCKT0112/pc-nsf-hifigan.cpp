@@ -1,0 +1,210 @@
+#include "pc_nsf_hifigan/hifigan.h"
+
+#include <mininsf/mininsf.h>
+
+#include <algorithm>
+#include <cmath>
+#include <cstdio>
+#include <cstring>
+#include <stdexcept>
+
+namespace pc_nsf_hifigan {
+
+namespace {
+
+// Conv1d "same" (pad = (K/2)*dilation, matching torch get_padding for odd K),
+// kernel layout [K, IC, OC], data layout [T, IC] -> [T', OC].
+ggml_tensor * conv1d_same(ggml_context * ctx, const GGUFModel & m,
+                          const std::string & prefix, ggml_tensor * x, int dilation = 1) {
+    ggml_tensor * w = gguf_get(m, prefix + ".weight");
+    if (w->type != GGML_TYPE_F16) w = ggml_cast(ctx, w, GGML_TYPE_F16);
+    const int pad = (int) (w->ne[0] / 2) * dilation;
+    ggml_tensor * y = ggml_conv_1d(ctx, w, x, 1, pad, dilation);
+    y = ggml_reshape_2d(ctx, y, y->ne[0], y->ne[1]);
+    ggml_tensor * b = ggml_reshape_2d(ctx, gguf_get(m, prefix + ".bias"), 1, y->ne[1]);
+    return ggml_add(ctx, y, b);
+}
+
+// Conv1d 1x1 via mul_mat (source_conv): kernel [1, IC, OC] -> [OC, T].
+ggml_tensor * conv1d_k1(ggml_context * ctx, const GGUFModel & m,
+                        const std::string & prefix, ggml_tensor * x) {
+    ggml_tensor * w = gguf_get(m, prefix + ".weight");
+    ggml_tensor * w2 = ggml_reshape_2d(ctx, w, w->ne[1], w->ne[2]);  // [IC, OC]
+    ggml_tensor * xt = ggml_cont(ctx, ggml_transpose(ctx, x));       // [IC, T]
+    ggml_tensor * y = ggml_mul_mat(ctx, w2, xt);                     // [OC, T]
+    y = ggml_cont(ctx, ggml_transpose(ctx, y));                      // [T, OC]
+    ggml_tensor * b = ggml_reshape_2d(ctx, gguf_get(m, prefix + ".bias"), 1, y->ne[1]);
+    return ggml_add(ctx, y, b);
+}
+
+// ConvTranspose1d with torch padding=(K-stride)/2: ggml conv_transpose_1d
+// asserts p0 == 0, so run p0=0 and crop `pad` samples from the left.
+ggml_tensor * conv_transpose1d_crop(ggml_context * ctx, const GGUFModel & m,
+                                    const std::string & prefix, ggml_tensor * x,
+                                    int stride, int kernel) {
+    ggml_tensor * w = gguf_get(m, prefix + ".weight");
+    // Do NOT rely on the weight's stored dtype: torch ckpt conv-transposed
+    // kernels come from weight-norm and are stored by our converter as F16.
+    // ggml conv_transpose_1d accepts F16/F32 kernels on CPU, but the Vulkan
+    // shader requires F32.  Cast to the backend-agnostic F32 here once.
+    if (w->type != GGML_TYPE_F32) w = ggml_cast(ctx, w, GGML_TYPE_F32);
+    ggml_tensor * y = ggml_conv_transpose_1d(ctx, w, x, stride, 0, 1);
+    y = ggml_reshape_2d(ctx, y, y->ne[0], y->ne[1]);
+    const int pad = (kernel - stride) / 2;
+    const int64_t target_len = x->ne[0] * stride;
+    if (pad > 0) {
+        y = ggml_view_2d(ctx, y, target_len, y->ne[1], y->nb[1], pad * y->nb[0]);
+        y = ggml_cont(ctx, y);
+    }
+    ggml_tensor * b = ggml_reshape_2d(ctx, gguf_get(m, prefix + ".bias"), 1, y->ne[1]);
+    return ggml_add(ctx, y, b);
+}
+
+// ResBlock1: for each of 3 (k, d) pairs: lrelu -> conv(d) -> lrelu -> conv(1) -> add.
+// convs1 dilations [1,3,5]; convs2 always dilation 1.
+ggml_tensor * resblock(ggml_context * ctx, const GGUFModel & m, ggml_tensor * x,
+                       int rb_index) {
+    ggml_tensor * h = x;
+    for (int k = 0; k < 3; ++k) {
+        const int dil = k == 0 ? 1 : (k == 1 ? 3 : 5);
+        char pre[96];
+        std::snprintf(pre, sizeof pre, "hifigan.resblocks.%d.convs1.%d", rb_index, k);
+        ggml_tensor * xt = ggml_leaky_relu(ctx, h, 0.1f, false);
+        xt = conv1d_same(ctx, m, pre, xt, dil);
+        xt = ggml_leaky_relu(ctx, xt, 0.1f, false);
+        std::snprintf(pre, sizeof pre, "hifigan.resblocks.%d.convs2.%d", rb_index, k);
+        xt = conv1d_same(ctx, m, pre, xt, 1);
+        h = ggml_add(ctx, xt, h);
+    }
+    return h;
+}
+
+}  // namespace
+
+// ---------------------------------------------------------------------------
+
+HifiganModel::HifiganModel(const std::string & path, int n_threads)
+    : gguf(gguf_load(path, n_threads)) {
+    const GGUFModel & gm = *gguf;
+    int64_t iv;
+    float fv;
+    if (gguf_meta_int(gm, "audio.n_mels", iv)) num_mels = (int) iv;
+    if (gguf_meta_int(gm, "hifigan.num_upsamples", iv)) num_upsamples = (int) iv;
+    if (gguf_meta_int(gm, "hifigan.num_resblocks", iv)) num_resblocks = (int) iv;
+    if (gguf_meta_int(gm, "hifigan.upsample_initial_channel", iv)) upsample_initial_channel = (int) iv;
+    if (gguf_meta_int(gm, "audio.sample_rate", iv)) sampling_rate = (int) iv;
+    if (gguf_meta_int(gm, "audio.hop", iv)) hop_size = (int) iv;
+    if (gguf_meta_int(gm, "hifigan.upp", iv)) upp = (int) iv;
+    if (gguf_meta_float(gm, "hifigan.source_sr", fv)) source_sr = fv;
+    if (gguf_meta_float(gm, "hifigan.noise_sigma", fv)) noise_sigma = fv;
+    gguf_meta_bool(gm, "hifigan.mini_nsf", mini_nsf);
+    std::vector<float> tmp;
+    if (gguf_meta_floats(gm, "hifigan.upsample_rates", tmp))
+        for (float v : tmp) upsample_rates.push_back((int) v);
+    if (gguf_meta_floats(gm, "hifigan.upsample_kernels", tmp))
+        for (float v : tmp) upsample_kernels.push_back((int) v);
+    if (gguf_meta_floats(gm, "hifigan.resblock_kernels", tmp))
+        for (float v : tmp) resblock_kernels.push_back((int) v);
+    if (gguf_meta_floats(gm, "hifigan.resblock_dilations", tmp))
+        for (float v : tmp) resblock_dilations.push_back((int) v);
+    if (upp == 0 && sampling_rate > 0 && !upsample_rates.empty()) {
+        // fallback: upp = prod(rates[:2]), source_sr = sr / prod(rates[2:])
+        upp = 1;
+        for (size_t i = 0; i < 2 && i < upsample_rates.size(); ++i) upp *= upsample_rates[i];
+        int tail = 1;
+        for (size_t i = 2; i < upsample_rates.size(); ++i) tail *= upsample_rates[i];
+        source_sr = (float) sampling_rate / (float) tail;
+    }
+    std::fprintf(stderr, "[pc-nsf-hifigan] mel=%d ups=%d resblocks=%d upp=%d source_sr=%.1f noise=%.4g\n",
+                 num_mels, num_upsamples, num_resblocks, upp, source_sr, noise_sigma);
+}
+
+HifiganModel::~HifiganModel() = default;
+HifiganModel::HifiganModel(HifiganModel &&) noexcept = default;
+HifiganModel & HifiganModel::operator=(HifiganModel &&) noexcept = default;
+
+void hifigan_run(const HifiganModel & m, const float * mel, const float * f0, int T,
+                 std::vector<float> & wav) {
+    const GGUFModel & gm = *m.gguf;
+    if (T <= 0 || !m.mini_nsf) {
+        throw std::runtime_error(m.mini_nsf ? "hifigan: frames must be positive"
+                                            : "hifigan: non-mini NSF source not implemented");
+    }
+
+    // source excitation [T*upp] from libmininsf (exact sinf path == torch)
+    std::vector<float> source((std::size_t) T * m.upp);
+    MiniNsfConfig cfg;
+    cfg.source_sample_rate = m.source_sr;
+    cfg.upsample = m.upp;
+    if (mininsf_fastsinegen_f32(f0, 1, T, &cfg, source.data()) != MININSF_OK) {
+        throw std::runtime_error("hifigan: libmininsf fastsinegen failed");
+    }
+    const int64_t source_len = (int64_t) source.size();
+
+    // mel row-major [T, C] -> column-major [C, T] (ggml ne0 = T)
+    std::vector<float> mel_cf((std::size_t) m.num_mels * T);
+    for (int t = 0; t < T; ++t)
+        for (int c = 0; c < m.num_mels; ++c)
+            mel_cf[(std::size_t) c * T + t] = mel[(std::size_t) t * m.num_mels + c];
+
+    // one shared ctx for inputs + graph (gallocr allocates the leaves)
+    ggml_context * ctx = ggml_init({ 1024ULL * 1024 * 1024, nullptr, true });
+    ggml_tensor * mel_in = ggml_new_tensor_2d(ctx, GGML_TYPE_F32, T, m.num_mels);
+    ggml_tensor * src_in = ggml_new_tensor_2d(ctx, GGML_TYPE_F32, source_len, 1);
+
+    ggml_cgraph * gf = ggml_new_graph_custom(ctx, GGML_DEFAULT_GRAPH_SIZE * 64, false);
+
+    ggml_tensor * x = conv1d_same(ctx, gm, "hifigan.conv_pre", mel_in, 1);
+    const int num_kernels = (int) m.resblock_kernels.size();
+    for (int i = 0; i < m.num_upsamples; ++i) {
+        x = ggml_leaky_relu(ctx, x, 0.1f, false);
+        char pre[64];
+        std::snprintf(pre, sizeof pre, "hifigan.ups.%d", i);
+        x = conv_transpose1d_crop(ctx, gm, pre, x, m.upsample_rates[i], m.upsample_kernels[i]);
+        if (i == 1) {
+            ggml_tensor * xs = conv1d_k1(ctx, gm, "hifigan.source_conv", src_in);
+            x = ggml_add(ctx, x, xs);
+        }
+        ggml_tensor * sum = nullptr;
+        for (int j = 0; j < num_kernels; ++j) {
+            ggml_tensor * rb = resblock(ctx, gm, x, i * num_kernels + j);
+            sum = sum ? ggml_add(ctx, sum, rb) : rb;
+        }
+        x = ggml_scale(ctx, sum, 1.0f / (float) num_kernels);
+    }
+    // NOTE: torch Generator.forward ends with F.leaky_relu(x) whose DEFAULT
+    // negative_slope is 0.01 (not 0.1).  The reference port uses 0.1 here,
+    // which deviates from the checkpoint -- we match torch.
+    x = ggml_leaky_relu(ctx, x, 0.01f, false);
+    x = conv1d_same(ctx, gm, "hifigan.conv_post", x, 1);
+    x = ggml_tanh(ctx, x);
+    ggml_set_output(x);
+
+    ggml_build_forward_expand(gf, x);
+    ggml_gallocr_t alloc = ggml_gallocr_new(ggml_backend_get_default_buffer_type(gm.backend));
+    if (!ggml_gallocr_alloc_graph(alloc, gf)) {
+        ggml_gallocr_free(alloc);
+        ggml_free(ctx);
+        throw std::runtime_error("hifigan: gallocr alloc failed");
+    }
+
+    ggml_backend_tensor_set(mel_in, mel_cf.data(), 0, mel_cf.size() * sizeof(float));
+    ggml_backend_tensor_set(src_in, source.data(), 0, source.size() * sizeof(float));
+    ggml_status st = ggml_backend_graph_compute(gm.backend, gf);
+    if (st != GGML_STATUS_SUCCESS) {
+        ggml_gallocr_free(alloc);
+        ggml_free(ctx);
+        throw std::runtime_error("hifigan: graph compute failed");
+    }
+
+    const int samples = (int) x->ne[0];
+    std::vector<float> tmp((std::size_t) x->ne[0] * x->ne[1]);
+    ggml_backend_tensor_get(x, tmp.data(), 0, tmp.size() * sizeof(float));
+    wav.resize((std::size_t) samples);
+    std::copy(tmp.begin(), tmp.begin() + samples, wav.begin());
+
+    ggml_gallocr_free(alloc);
+    ggml_free(ctx);
+}
+
+}  // namespace pc_nsf_hifigan

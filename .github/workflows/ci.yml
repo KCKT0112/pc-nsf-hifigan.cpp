@@ -1,0 +1,48 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  build-and-test:
+    name: ${{ matrix.config.name }}
+    runs-on: ${{ matrix.config.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        config:
+          - { name: Ubuntu,  os: ubuntu-latest, backend: "",        python: python3 }
+          - { name: Windows, os: windows-latest, backend: "",       python: python }
+          - { name: macOS,   os: macos-latest,   backend: "Metal",  python: python3 }
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+
+      - name: Python deps (numpy + gguf for golden gen)
+        run: ${{ matrix.config.python }} -m pip install numpy gguf
+
+      - name: Configure
+        run: >
+          cmake -S . -B build
+          -D CMAKE_BUILD_TYPE=Release
+          ${{ matrix.config.backend == 'Metal' && '-DPCNSF_METAL=ON' || '' }}
+          -D PCNSF_BUILD_TESTS=ON
+          -D PCNSF_BUILD_CLI=${{ matrix.config.os != 'windows-latest' && 'ON' || 'OFF' }}
+
+      - name: Build
+        run: cmake --build build --config Release -j 2
+
+      - name: CTest (golden fixture + core tests, skip vocode-e2e)
+        working-directory: build
+        run: ctest --output-on-failure -L core
+
+      - name: CTest all incl extras
+        working-directory: build
+        run: ctest --output-on-failure
