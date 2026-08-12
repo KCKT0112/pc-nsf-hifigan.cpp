@@ -41,10 +41,10 @@ pcnsf_add_test(t04_gguf_meta   test_gguf_meta     test_gguf_meta.cpp)
 
 # optional end-to-end vocode test driven by PCNSF_MODEL_GGUF
 if(DEFINED ENV{PCNSF_MODEL_GGUF})
-    add_executable(test_vocode tests/test_vocode.cpp)
+    add_executable(test_vocode test_vocode.cpp)
     target_link_libraries(test_vocode PRIVATE pc_nsf_hifigan::pc_nsf_hifigan)
     target_compile_definitions(test_vocode PRIVATE
-        PCNSF_MODEL_GGUF="${PCNSF_MODEL_GGUF}" PCNSF_GOLDEN_DIR="${PCNSF_GOLDEN_DIR}")
+        PCNSF_MODEL_GGUF="$ENV{PCNSF_MODEL_GGUF}" PCNSF_GOLDEN_DIR="${PCNSF_GOLDEN_DIR}")
     add_test(NAME t05_vocode COMMAND test_vocode)
     set_tests_properties(t05_vocode PROPERTIES FIXTURES_REQUIRED golden LABELS "e2e")
 endif()
