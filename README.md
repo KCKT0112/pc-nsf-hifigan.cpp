@@ -41,6 +41,27 @@ build/bin/hifigan_cli hifigan.gguf mel.bin f0.bin out.wav
 | ggml-patch | patch set + ext/ (no ggml fork) | maintained |
 | libmininsf | mini-nsf sine source generator (this repo's dependency) | maintained |
 
+## Model release
+
+This repo is the **quantization exception** in the ecosystem: the vocoder is
+numerically sensitive, so only two precisions are ever produced
+(`converter/convert_hifigan.py --quant f16|f32`); there is **no** `rec`/Q8
+tier.
+
+| Asset | Precision | When to use |
+|---|---|---|
+| `hifigan_f16.gguf` | F16 (default) | normal deployments |
+| `hifigan_f32.gguf` | F32 | golden-grade regression baseline |
+
+- Publish via GitHub **Releases**, never commit weights to the repo.
+- Names always carry the precision suffix (`f16` / `f32`) — consumers glob by
+  size (e.g. OpenUtau), so a bare `hifigan.gguf` would silently shadow the
+  other precision.
+- Release checklist: convert → F16 wav vs torch reference (CTest t01/t02 +
+  `tests/gen_hifigan_golden.py`) → attach both assets to the release notes.
+- Future fp16 *training* pilots are validated torch-side first; the inference
+  interface stays F16/F32 only.
+
 ## Development guide
 
 ### For contributors

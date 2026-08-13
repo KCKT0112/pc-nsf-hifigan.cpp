@@ -41,6 +41,23 @@ build/bin/hifigan_cli hifigan.gguf mel.bin f0.bin out.wav
 | ggml-patch | 补丁集 + ext/（无 ggml fork） | maintained |
 | libmininsf | mini-nsf 正弦源生成器（本仓库依赖） | maintained |
 
+## 模型发布
+
+本仓库是生态中的**量化例外**：vocoder 对数值敏感，只产出两种精度
+（`converter/convert_hifigan.py --quant f16|f32`），**没有** `rec`/Q8 档。
+
+| 资产 | 精度 | 使用场景 |
+|---|---|---|
+| `hifigan_f16.gguf` | F16（默认） | 常规部署 |
+| `hifigan_f32.gguf` | F32 | golden 级回归基线 |
+
+- 通过 GitHub **Releases** 发布，权重不提交进仓库。
+- 文件名必须带精度后缀（`f16` / `f32`）——消费者按 size glob（如
+  OpenUtau），裸 `hifigan.gguf` 会静默遮蔽另一精度。
+- 发布清单：转换 → F16 wav 对 torch 参考验证（CTest t01/t02 +
+  `tests/gen_hifigan_golden.py`）→ 双精度资产附到 release notes。
+- 未来 fp16 *训练*试点先在 torch 侧验证；推理接口保持仅 F16/F32。
+
 ## 开发指引
 
 ### 贡献者
