@@ -48,14 +48,18 @@ set(MININSF_BUILD_EXAMPLES OFF CACHE BOOL "" FORCE)
 FetchContent_MakeAvailable(mininsf)
 
 # pocketfft (BSD-3-Clause) — header-only STFT r2c FFT used by mel.cpp.
+# Idempotent: when this repo is aggregated (hifisampler/hachitune), the
+# parent may already define the same helper target.
 FetchContent_Declare(
     pocketfft
     GIT_REPOSITORY https://github.com/mreineck/pocketfft.git
     GIT_TAG        32424d2067c2e8043dc646a4e49754b2b40cc549   # cpp @ 2025-10
 )
 FetchContent_MakeAvailable(pocketfft)
-add_library(pocketfft INTERFACE)
-target_include_directories(pocketfft SYSTEM INTERFACE "${pocketfft_SOURCE_DIR}")
+if(NOT TARGET pocketfft)
+    add_library(pocketfft INTERFACE)
+    target_include_directories(pocketfft SYSTEM INTERFACE "${pocketfft_SOURCE_DIR}")
+endif()
 
 # dr_libs (Public Domain/MIT-0) — single-header WAV writer used by the CLI.
 FetchContent_Declare(
@@ -64,8 +68,10 @@ FetchContent_Declare(
     GIT_TAG        243e26ffa08a24dc8ae2e7a8c57123d9e504690c   # master @ 2025-10
 )
 FetchContent_MakeAvailable(dr_libs)
-add_library(dr_wav INTERFACE)
-target_include_directories(dr_wav SYSTEM INTERFACE "${dr_libs_SOURCE_DIR}")
+if(NOT TARGET dr_wav)
+    add_library(dr_wav INTERFACE)
+    target_include_directories(dr_wav SYSTEM INTERFACE "${dr_libs_SOURCE_DIR}")
+endif()
 
 message(STATUS "Third-party fetched:")
 message(STATUS "  ggml       ${ggml_SOURCE_DIR}")
