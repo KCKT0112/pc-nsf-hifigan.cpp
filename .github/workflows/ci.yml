@@ -40,8 +40,8 @@ jobs:
 
       - name: CTest (golden fixture + core tests, skip vocode-e2e)
         working-directory: build
-        run: ctest --output-on-failure -L core
+        run: ctest --output-on-failure -C Release -L core
 
       - name: CTest all incl extras
         working-directory: build
-        run: ctest --output-on-failure
+        run: ctest --output-on-failure -C Release
