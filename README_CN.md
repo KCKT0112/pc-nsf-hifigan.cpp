@@ -32,14 +32,16 @@ build/bin/hifigan_cli hifigan.gguf mel.bin f0.bin out.wav
 
 ## 生态定位
 
-| 仓库 | 组件 | 状态 |
+完整引用链见 `ggml-patch` 的 `docs/ECOSYSTEM.md`。训练侧仓库不使用 ggml——这些 C++ 仓库面向端侧部署。
+
+| 仓库 | 组件 | 关系 |
 |---|---|---|
-| **pc-nsf-hifigan.cpp** | NSF-HiFiGAN vocoder（本仓库，libmininsf 源） | maintained |
-| hachitune.cpp | RMVPE 音高 + cuFCPE | maintained |
-| hifisampler.cpp | VR 人声分离 | maintained |
-| game_ggml_cli | GAME（DiffSinger V3, score recognition） | independent opudep |
-| ggml-patch | 补丁集 + ext/（无 ggml fork） | maintained |
-| libmininsf | mini-nsf 正弦源生成器（本仓库依赖） | maintained |
+| **pc-nsf-hifigan.cpp** | NSF-HiFiGAN vocoder（本仓库） | 依赖 `libmininsf`；被 `hifisampler` 作为构建依赖拉取 |
+| libmininsf | mini-nsf 正弦源 | 基础组件（本仓库依赖） |
+| hifisampler.cpp | VR 人声分离 | 构建 VR + vocoder |
+| hachitune.cpp | RMVPE 音高 + cuFCPE | 消费 `ggml-patch` `ext/rnn` |
+| ggml-patch | 补丁集 + ext/（无 ggml fork） | 生态基础 |
+| game_ggml_cli | GAME（DiffSinger V3, score recognition） | 独立 opudep |
 
 ## 模型发布
 

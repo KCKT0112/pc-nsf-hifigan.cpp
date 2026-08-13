@@ -32,14 +32,17 @@ build/bin/hifigan_cli hifigan.gguf mel.bin f0.bin out.wav
 
 ## Ecosystem positioning
 
-| Repository | Component | Status |
+Full reference chain: see `ggml-patch` `docs/ECOSYSTEM.md`. Training-side
+repos never use ggml — these C++ repos exist for edge deployment.
+
+| Repository | Component | Relationship |
 |---|---|---|
-| **pc-nsf-hifigan.cpp** | NSF-HiFiGAN vocoder (this repo, libmininsf source) | maintained |
-| hachitune.cpp | RMVPE pitch + cuFCPE | maintained |
-| hifisampler.cpp | VR vocal remover | maintained |
+| **pc-nsf-hifigan.cpp** | NSF-HiFiGAN vocoder (this repo) | depends on `libmininsf`; pulled by `hifisampler` as a build dependency |
+| libmininsf | mini-nsf sine source | base component (this repo's dependency) |
+| hifisampler.cpp | VR vocal remover | builds VR + vocoder |
+| hachitune.cpp | RMVPE pitch + cuFCPE | consumes `ggml-patch` `ext/rnn` |
+| ggml-patch | patch set + ext/ (no ggml fork) | ecosystem foundation |
 | game_ggml_cli | GAME (DiffSinger V3, score recognition) | independent opudep |
-| ggml-patch | patch set + ext/ (no ggml fork) | maintained |
-| libmininsf | mini-nsf sine source generator (this repo's dependency) | maintained |
 
 ## Model release
 
