@@ -1,8 +1,8 @@
-# BUILDING
+# BUILDING · 构建指南
 
-pc-nsf-hifigan 依赖均通过 FetchContent 获取，无需手动安装第三方库。
+pc-nsf-hifigan 依赖均通过 FetchContent 获取，无需手动安装第三方库。 · All dependencies are fetched by CMake (FetchContent); no manual third-party installs.
 
-## 依赖
+## 依赖 · Dependencies
 
 | 组件 | 来源 | 版本 |
 |------|------|------|
@@ -11,7 +11,7 @@ pc-nsf-hifigan 依赖均通过 FetchContent 获取，无需手动安装第三方
 | pocketfft | mreineck/pocketfft | cpp pin |
 | dr_libs (dr_wav) | mackron/dr_libs | master pin |
 
-> D2 决策：本仓库**不维护 ggml fork**，任何上游不接受的 patch 进入
+> 补丁策略：本仓库**不维护 ggml fork**，任何上游不接受的 patch 进入
 > `KakaruHayate/ggml-patch`，由启用 CUDA 的消费者应用。CPU/F16 路径无需
 > patch（见 docs/hifigan.md）。
 

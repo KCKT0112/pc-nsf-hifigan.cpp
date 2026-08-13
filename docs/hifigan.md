@@ -1,8 +1,8 @@
-# NSF-HiFiGAN ggml 推理架构
+# NSF-HiFiGAN ggml 推理架构 · Inference architecture
 
-本文档描述 pc-nsf-hifigan 的图构建、权重布局、正确性保证和设计决策。
+本文档描述 pc-nsf-hifigan 的图构建、权重布局、正确性保证和设计决策。 · This document covers graph construction, weight layout, correctness guarantees, and design decisions.
 
-## 1. 模型结构（DiffSinger mini_nsf Generator）
+## 1. 模型结构 · Model structure（DiffSinger mini_nsf Generator）
 
 ```
 source = fastsinegen(f0)                     [libmininsf, 布局见 §3]
