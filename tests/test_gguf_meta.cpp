@@ -29,7 +29,8 @@ int main() {
               rates.size() == 5 && rates[0] == 8.0f && rates[4] == 2.0f);
 
         ggml_tensor * w = pc_nsf_hifigan::gguf_get(*m, "hifigan.tiny_w");
-        CHECK(w != nullptr && w->ne[0] == 3 && w->ne[1] == 2);
+        // gguf-py writes numpy (3,2) with ggml's reversed shape -> ne = (2,3)
+        CHECK(w != nullptr && w->ne[0] == 2 && w->ne[1] == 3);
         std::vector<float> data(6);
         ggml_backend_tensor_get(w, data.data(), 0, data.size() * sizeof(float));
         bool all_ok = true;

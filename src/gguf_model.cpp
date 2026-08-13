@@ -47,14 +47,14 @@ std::unique_ptr<GGUFModel> gguf_load(const std::string & path, int n_threads) {
         if (t) m->tensors[name] = t;
     }
 
-    // GPU backends (Vulkan/CUDA/Metal): weights live in the meta context (CPU
-    // memory) after gguf_init, but a bare ggml_backend_graph_compute will not
-    // upload them -- the device shader would read CPU memory and crash.  Copy
-    // every weight tensor into one device buffer so they are directly usable
-    // as graph leaves.  After this, tensor->data is a device-side pointer
-    // (Vulkan: fake base 0x1000 + offset) and MUST only be accessed through
-    // ggml_backend_tensor_get/set.
-    if (!ggml_backend_is_cpu(m->backend)) {
+    // Copy every weight tensor from the gguf blob into a backend buffer so
+    // all weights carry both data and a buffer:
+    //   GPU : device buffer (Vulkan data pointers are fake 0x1000+offset --
+    //         never dereference, always go through tensor_get/set)
+    //   CPU : host buffer; identical code path, no device involved.
+    // Without the CPU buffer, ggml_backend_tensor_get/set asserts
+    // "tensor buffer not set" (gguf_init leaves buffer == NULL).
+    {
         ggml_backend_buffer_type_t buft = ggml_backend_get_default_buffer_type(m->backend);
         const size_t align = ggml_backend_buft_get_alignment(buft);
         size_t total = 0;
@@ -82,8 +82,9 @@ std::unique_ptr<GGUFModel> gguf_load(const std::string & path, int n_threads) {
             off += ggml_backend_buft_get_alloc_size(buft, t);
             off = (char *) (((uintptr_t) off + align - 1) & ~(uintptr_t)(align - 1));
         }
-        std::fprintf(stderr, "uploaded %u tensors (%.1f MB) to device buffer\n",
-                     (unsigned) m->tensors.size(), total / 1e6);
+        std::fprintf(stderr, "loaded %u tensors (%.1f MB) into %s buffer\n",
+                     (unsigned) m->tensors.size(), total / 1e6,
+                     ggml_backend_name(m->backend));
     }
     return m;
 }
