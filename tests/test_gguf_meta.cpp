@@ -31,10 +31,16 @@ int main() {
         ggml_tensor * w = pc_nsf_hifigan::gguf_get(*m, "hifigan.tiny_w");
         // gguf-py writes numpy (3,2) with ggml's reversed shape -> ne = (2,3)
         CHECK(w != nullptr && w->ne[0] == 2 && w->ne[1] == 3);
-        std::vector<float> data(6);
-        ggml_backend_tensor_get(w, data.data(), 0, data.size() * sizeof(float));
+        // tensor is F16 (12 bytes); read exactly ggml_nbytes and decode
+        std::vector<uint8_t> raw(ggml_nbytes(w));
+        ggml_backend_tensor_get(w, raw.data(), 0, ggml_nbytes(w));
         bool all_ok = true;
-        for (float v : data) all_ok = all_ok && std::fabs(v - 0.25f) < 1e-2f;
+        for (int i = 0; i < 6; ++i) {
+            ggml_fp16_t h;
+            std::memcpy(&h, raw.data() + 2 * i, 2);
+            float v = ggml_fp16_to_fp32(h);
+            all_ok = all_ok && std::fabs(v - 0.25f) < 1e-2f;
+        }
         CHECK(all_ok);
     } catch (const std::exception & e) {
         std::fprintf(stderr, "unexpected exception: %s\n", e.what());
