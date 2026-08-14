@@ -23,7 +23,7 @@ if(APPLE AND PCNSF_METAL)
     set(GGML_METAL_EMBED_LIBRARY OFF CACHE BOOL "ggml: embed Metal library" FORCE)
 endif()
 
-# ggml (MIT) — tensor engine.  Pinned to v0.11.0 (matches game_ggml_cli).
+# ggml (MIT) — tensor engine.  Pinned to v0.19.0 (matches game_ggml_cli).
 # Per D2 we do NOT maintain a fork; we track ggml main and only carry .patch
 # files in KakaruHayate/ggml-patch.  No patches are applied here (CPU/F16
 # path needs none; the CUDA conv_transpose_1d local window / im2col wide OW
@@ -31,7 +31,7 @@ endif()
 FetchContent_Declare(
     ggml
     GIT_REPOSITORY https://github.com/ggerganov/ggml.git
-    GIT_TAG        v0.11.0
+    GIT_TAG        v0.19.0
     GIT_SHALLOW    TRUE
 )
 FetchContent_MakeAvailable(ggml)
