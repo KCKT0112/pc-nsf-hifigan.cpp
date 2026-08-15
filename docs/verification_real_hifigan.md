@@ -23,8 +23,9 @@
 
 | 路径 | max | rms | corr |
 |---|---|---|---|
-| legacy convT F32 | 0.00179 | 6.38e-05 | 0.9999994 |
-| sub-pixel F32 | 0.237 | 0.0414 | 0.696 |
+| legacy convT F32（CPU） | 0.00179 | 6.38e-05 | 0.9999994 |
+| legacy convT F32（Vulkan） | 0.00983 | 2.40e-04 | 0.999991 |
+| sub-pixel F32（CPU） | 0.237 | 0.0414 | 0.696 |
 
 > 早期用小常量 mel 的 stage-0 冒烟可达 ~1e-3；但真实变长 mel/f0 全链路下
 > **sub-pixel 路径数值明显错误（corr 0.696）**，不能用于发布。convT 路径
@@ -38,6 +39,7 @@
 | ggml CPU F32 convT（4 线程） | 55096 ms | ≈2.8x 慢于实时 | 与 sub-pixel 相当，非 sub-pixel 特有 |
 | ggml CPU F32 convT（16 线程） | 21809 ms | ≈1.09x（勉强实时） | `HF_THREADS=16` 后约 2.4x 提升 |
 | ggml CPU F16 convT（16 线程） | 22815 ms | ≈1.14x | 权重 fp16 但计算仍 fp32，无额外提速 |
+| ggml Vulkan F32 convT（RTX 2070） | 18742 ms | ≈0.94x | Vulkan 后端比 16 线程 CPU 略快一点，仍远不及 torch CUDA |
 | torch CUDA（同参数参考） | 557 ms | 0.028（36x 实时） | CUDA 正常加速 |
 
 > CLI 现在支持 `HF_THREADS`（默认 4）显式控制 ggml CPU 线程数。
@@ -46,17 +48,16 @@ CPU 与 torch CUDA 差距巨大；CPU 路径是当前最大瓶颈，需按 conv/
 profile（怀疑 conv1d 在 v0.19 CPU 上未并行 + 大中间 tensor 的
 `ggml_cont`/im2col 开销）。
 
-## Vulkan / CUDA 构建状态（本机受阻，非代码回归）
+## Vulkan / CUDA 构建状态
 
-- **CUDA**：`build-cuda-v019`（`PCNSF_CUDA=ON`，VS16/MSVC v142 + CUDA 13.0）编译
-  ggml-cuda 模板实例即失败：
-  `nvcc fatal: A single input file is required for a non-link phase when an outputfile is specified`
-  —— 已知的 MSVC v160 与 CUDA 13.0 MSBuild 集成不兼容（需 VS2022 v143 或
-  Ninja/直调 nvcc）。此前报告同样结论，属环境工具链问题。
-- **Vulkan**：`PCNSF_VULKAN=ON` configure 已找到
-  `C:/VulkanSDK/1.4.350.0`，但 ggml-vulkan 的
-  `add_custom_command(DEPFILE ...)` 在 **Visual Studio 16 2019** 生成器不受支持，
-  configure 失败（需 Ninja 或更新 VS 生成器）。
+- **Vulkan（✅ 已通过）**：用 VS 内置 **Ninja** 生成器（`-G Ninja`）+ 本地
+  FetchContent 拉取，`PCNSF_VULKAN=ON` 构建成功并 E2E 跑通
+  （`build-vk-ninja2/bin/hifigan_cli.exe`，RTX 2070）。VS16 MSBuild 的
+  `DEPFILE` 限制由此绕开。
+- **CUDA（❌ 本机工具链阻塞）**：`PCNSF_CUDA=ON` 无论 MSBuild 还是 Ninja，
+  `nvcc fatal: A single input file is required for a non-link phase when an
+  outputfile is specified` 均复现（CUDA 13.0 + 本机 MSVC v160 环境无法通过
+  nvcc -forward-unknown 的多个输入——需 VS2022/受支持工具链的机器验证）。
 
 ## 结论 / 建议
 
@@ -67,12 +68,12 @@ profile（怀疑 conv1d 在 v0.19 CPU 上未并行 + 大中间 tensor 的
    `HF_THREADS` 控制线程数；要进一步需 profile
    conv1d/resblock 与 `ggml_cont`，评估多线程与算子替换（如预留
    im2col+fp32 mul_mat、避免每层大 cont copy）。
-3. **CUDA/Vulkan 未在本机验证**：工具链阻碍明确，建议在带 VS2022/Ninja 的 CI
-   或机器上补跑 E2E 数值与 RTF。
+3. **Vulkan 已验证**（RTX 2070：corr 0.99999、RTF≈0.94），**CUDA 仍因本机
+   工具链未跑通**；建议在受支持的 VS2022/CI 环境补 CUDA E2E 数值与 RTF。
 
 ## 产物路径（本机，build 目录内）
 
 - GGUF：`pc-nsf-hifigan.cpp/build-v019/ab/real_f32_sub.gguf`、`real_f16_sub.gguf`、`real_f32_convt.gguf`
 - 输入：`real_mel.bin`、`real_f0.bin`
-- 参考/输出 raw：`torch_real_ref.raw`、`real_cpu_f32.raw`、`real_cpu_convt.raw`
+- 参考/输出 raw：`torch_real_ref.raw`、`real_cpu_f32.raw`、`real_cpu_convt.raw`、`real_default_f32.raw`、`real_vk_f32.raw`
 - 脚本：`prepare_inputs.py`、`torch_ref_real.py`、`torch_time.py`、`gen_convt.py`
