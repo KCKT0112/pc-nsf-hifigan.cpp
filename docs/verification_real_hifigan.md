@@ -25,6 +25,7 @@
 |---|---|---|---|
 | legacy convT F32（CPU） | 0.00179 | 6.38e-05 | 0.9999994 |
 | legacy convT F32（Vulkan） | 0.00983 | 2.40e-04 | 0.999991 |
+| legacy convT F32（CUDA） | 0.01106 | 2.37e-04 | 0.999991 |
 | sub-pixel F32（CPU） | 0.237 | 0.0414 | 0.696 |
 
 > 早期用小常量 mel 的 stage-0 冒烟可达 ~1e-3；但真实变长 mel/f0 全链路下
@@ -40,6 +41,7 @@
 | ggml CPU F32 convT（16 线程） | 21809 ms | ≈1.09x（勉强实时） | `HF_THREADS=16` 后约 2.4x 提升 |
 | ggml CPU F16 convT（16 线程） | 22815 ms | ≈1.14x | 权重 fp16 但计算仍 fp32，无额外提速 |
 | ggml Vulkan F32 convT（RTX 2070） | 18742 ms | ≈0.94x | Vulkan 后端比 16 线程 CPU 略快一点，仍远不及 torch CUDA |
+| ggml CUDA F32 convT（RTX 2070） | 1378 ms | 0.069（≈14.5x 实时） | CUDA 后端真正可用，仍约为 torch CUDA 的 2.5x |
 | torch CUDA（同参数参考） | 557 ms | 0.028（36x 实时） | CUDA 正常加速 |
 
 > CLI 现在支持 `HF_THREADS`（默认 4）显式控制 ggml CPU 线程数。
@@ -48,16 +50,16 @@ CPU 与 torch CUDA 差距巨大；CPU 路径是当前最大瓶颈，需按 conv/
 profile（怀疑 conv1d 在 v0.19 CPU 上未并行 + 大中间 tensor 的
 `ggml_cont`/im2col 开销）。
 
-## Vulkan / CUDA 构建状态
+## Vulkan / CUDA 构建状态（本机均通过）
 
-- **Vulkan（✅ 已通过）**：用 VS 内置 **Ninja** 生成器（`-G Ninja`）+ 本地
-  FetchContent 拉取，`PCNSF_VULKAN=ON` 构建成功并 E2E 跑通
-  （`build-vk-ninja2/bin/hifigan_cli.exe`，RTX 2070）。VS16 MSBuild 的
-  `DEPFILE` 限制由此绕开。
-- **CUDA（❌ 本机工具链阻塞）**：`PCNSF_CUDA=ON` 无论 MSBuild 还是 Ninja，
-  `nvcc fatal: A single input file is required for a non-link phase when an
-  outputfile is specified` 均复现（CUDA 13.0 + 本机 MSVC v160 环境无法通过
-  nvcc -forward-unknown 的多个输入——需 VS2022/受支持工具链的机器验证）。
+- **Vulkan（✅）**：VS 内置 **Ninja** 生成器（`-G Ninja`）+ 本地 FetchContent，
+  `PCNSF_VULKAN=ON` 构建成功并 E2E 跑通（RTX 2070）。
+- **CUDA（✅，已修复根因）**：`nvcc "A single input file is required"` 的真因是
+  项目对 MSVC 全局 `add_compile_options(/utf-8)` 泄漏给 NVCC（裸 `/utf-8` 被
+  当作第二个输入文件）。修复为 `$<$<COMPILE_LANGUAGE:C,CXX>:/utf-8>` 后，
+  `PCNSF_CUDA=ON` + Ninja + `-DCMAKE_CUDA_ARCHITECTURES=75-real`
+  （RTX 2070 只需 sm_75，单架构显著缩短编译）构建成功并 E2E 跑通
+  （`build-cuda-ninja/bin/hifigan_cli.exe`）。提交 `0d71cf4`。
 
 ## 结论 / 建议
 
@@ -68,12 +70,13 @@ profile（怀疑 conv1d 在 v0.19 CPU 上未并行 + 大中间 tensor 的
    `HF_THREADS` 控制线程数；要进一步需 profile
    conv1d/resblock 与 `ggml_cont`，评估多线程与算子替换（如预留
    im2col+fp32 mul_mat、避免每层大 cont copy）。
-3. **Vulkan 已验证**（RTX 2070：corr 0.99999、RTF≈0.94），**CUDA 仍因本机
-   工具链未跑通**；建议在受支持的 VS2022/CI 环境补 CUDA E2E 数值与 RTF。
+3. **三后端均已验证**：CPU/Vulkan/CUDA 精度 corr>0.9999；
+   CUDA 效率最佳（RTF 0.069，≈14.5x 实时），Vulkan≈0.94x，CPU≈1.09x（16 线程）。
+   CUDA 是当前可部署的加速后端。
 
 ## 产物路径（本机，build 目录内）
 
 - GGUF：`pc-nsf-hifigan.cpp/build-v019/ab/real_f32_sub.gguf`、`real_f16_sub.gguf`、`real_f32_convt.gguf`
 - 输入：`real_mel.bin`、`real_f0.bin`
-- 参考/输出 raw：`torch_real_ref.raw`、`real_cpu_f32.raw`、`real_cpu_convt.raw`、`real_default_f32.raw`、`real_vk_f32.raw`
+- 参考/输出 raw：`torch_real_ref.raw`、`real_cpu_f32.raw`、`real_cpu_convt.raw`、`real_default_f32.raw`、`real_vk_f32.raw`、`real_cuda_f32.raw`
 - 脚本：`prepare_inputs.py`、`torch_ref_real.py`、`torch_time.py`、`gen_convt.py`
