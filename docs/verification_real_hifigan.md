@@ -23,32 +23,31 @@
 
 | 路径 | max | rms | corr |
 |---|---|---|---|
-| legacy convT F32（CPU） | 0.00179 | 6.38e-05 | 0.9999994 |
-| legacy convT F32（Vulkan） | 0.00983 | 2.40e-04 | 0.999991 |
-| legacy convT F32（CUDA） | 0.01106 | 2.37e-04 | 0.999991 |
-| sub-pixel F32（CPU） | 0.237 | 0.0414 | 0.696 |
+| legacy convT F32（CPU，旧基线） | 0.00179 | 6.38e-05 | 0.9999994 |
+| **sub-pixel F32（CPU，相位主序/tile-bias，默认）** | 4.88e-04 | 3.97e-05 | 0.99999976 |
+| **sub-pixel F32（Vulkan）** | 0.01610 | 2.60e-04 | 0.999990 |
+| **sub-pixel F32（CUDA）** | 0.01622 | 2.72e-04 | 0.999989 |
 
-> 早期用小常量 mel 的 stage-0 冒烟可达 ~1e-3；但真实变长 mel/f0 全链路下
-> **sub-pixel 路径数值明显错误（corr 0.696）**，不能用于发布。convT 路径
-> 与 torch 高度一致（corr>0.9999），仍是当前可靠默认。
+> sub-pixel 早期全链路 corr 0.696 的根因 = **bias 复制错**（应 tile
+> `bias.repeat(s)`），修复后真实 20s 输入 corr>0.9999，三后端一致（终值仅余
+> fp32/im2col 后端数值差异）。legacy convT 仅用于旧 GGUF 回退。
 
 ## 效率（本机，T=1722，约 19.99s 音频；PCNSF_TIMING 只计 `hifigan_run`）
 
 | 后端 | 耗时 | RTF | 备注 |
 |---|---|---|---|
-| ggml CPU F32 convT（4 线程，旧 im2col） | 55096 ms | ≈2.8x 慢于实时 | 提速前的失真基线 |
-| ggml CPU F32 convT（16 线程，旧 im2col） | 21809 ms | ≈1.09x | `HF_THREADS=16` |
-| **ggml CPU F32 convT（16 线程，F32 im2col+mul_mat）** | **17671 ms** | **≈0.88x（低于实时）** | 本轮 conv1d 提速 ~22%，corr 0.9999998 |
-| **ggml Vulkan F32 convT（F32 im2col+mul_mat）** | **2279 ms** | **0.114（≈8.8x 实时）** | 较旧 Vulkan 18.7s 提速 ~8x，corr 0.999991 |
-| ggml CUDA F32 convT（RTX 2070，保持原生 conv1d） | ~1378 ms | 0.069（≈14.5x 实时） | CUDA 用 stock ggml_conv_1d（F32 im2col 反而更慢） |
+| ggml CPU F32 convT（16 线程，旧 im2col，提速前） | 21809 ms | ≈1.09x | 仅供对比 |
+| **ggml CPU F32 sub-pixel（16 线程，默认）** | **16818 ms** | **≈0.84x（低于实时）** | 相位主序 tile-bias + F32 im2col |
+| **ggml Vulkan F32 sub-pixel（RTX 2070）** | **2010 ms** | **0.100（≈10x 实时）** | convT 18.7s → 2.0s（~9x） |
+| **ggml CUDA F32 sub-pixel（RTX 2070）** | **1576 ms** | **0.079（≈12.7x 实时）** | CUDA 保持 stock conv1d |
 | torch CUDA（同参数参考） | 557 ms | 0.028（36x 实时） | CUDA 正常加速 |
 
-> CLI 支持 `HF_THREADS`（默认 4）控制 CPU 线程；新 CPU/Vulkan 路径通过
-> conv1d 改为 **F32 im2col + mul_mat**（`PCNSF_MANUAL_CONV=1/0` 可覆盖默认）。
+> CLI 支持 `HF_THREADS`（默认 4）控制 CPU 线程；非 CUDA 后端 conv1d 默认走
+> **F32 im2col + mul_mat**（`PCNSF_MANUAL_CONV=1/0` 可覆盖）。
 
-CPU（16 线程）已低于实时（RTF 0.88），Vulkan 提速至 RTF 0.114；CUDA 依旧最快
-（RTF 0.069）。相对 torch CUDA 仍慢 ~2.5-4x，下一步可在 GPU mul_mat 与
-convT 侧继续压（convT 仍走 ggml 原生，未做 F32 im2col 化）。
+CPU（16 线程）已低于实时（RTF 0.84）；Vulkan 提速至 RTF 0.10、CUDA 0.079。
+相对 torch CUDA 仍慢 ~2.8-30x，下一步可继续压 GPU 的 convT/interleave 与
+CUDA conv1d 的 F32 im2col 侧。
 
 ## Vulkan / CUDA 构建状态（本机均通过）
 
@@ -76,7 +75,7 @@ convT 侧继续压（convT 仍走 ggml 原生，未做 F32 im2col 化）。
 
 ## 产物路径（本机，build 目录内）
 
-- GGUF：`pc-nsf-hifigan.cpp/build-v019/ab/real_f32_sub.gguf`、`real_f16_sub.gguf`、`real_f32_convt.gguf`
+- GGUF：`pc-nsf-hifigan.cpp/build-v019/ab/real_f32_sub.gguf`、`real_f16_sub.gguf`、`real_f32_convt.gguf`、`real_f32_pm2.gguf`（修复后 sub-pixel 默认）
 - 输入：`real_mel.bin`、`real_f0.bin`
-- 参考/输出 raw：`torch_real_ref.raw`、`real_cpu_f32.raw`、`real_cpu_convt.raw`、`real_default_f32.raw`、`real_vk_f32.raw`、`real_cuda_f32.raw`
-- 脚本：`prepare_inputs.py`、`torch_ref_real.py`、`torch_time.py`、`gen_convt.py`
+- 参考/输出 raw：`torch_real_ref.raw`、`real_default_f32.raw`、`subpm_cpu.raw`、`subpm_vk.raw`、`subpm_cuda.raw`
+- 脚本：`prepare_inputs.py`、`torch_ref_real.py`、`torch_time.py`、`gen_convt.py`、`gen_sub_pm.py`、`dbg_subpix_pm.py`

@@ -10,7 +10,7 @@
 
 ## 特性
 
-- **原生 ggml 算子** — 默认 `ggml_conv_transpose_1d` 上采样（精确）；可选 sub-pixel `ggml_conv_1d` + graph interleave（实验性）+ `ggml_mul_mat`（source conv）
+- **原生 ggml 算子** — sub-pixel 上采样（相位主序，精确）走 F32 `im2col+mul_mat` + graph interleave（默认）；`ggml_conv_transpose_1d` 仅作 legacy 回退 + `ggml_mul_mat`（source conv）
 - **多后端** — 权重自动上传到后端 buffer（CPU/Vulkan/CUDA/Metal 通用），设备 shader 不读 CPU 内存
 - **F16/F32 双线路（不量化）** — F32 线路（权重+计算 fp32，精确基线）；F16 线路（权重 fp16，为未来 fp16/bf16 训练试点预留）
 - **Mel 前端** — `mel_nvstft`（DiffSinger hifigan 前端）+ `MelExtractor`（生态 API parity）

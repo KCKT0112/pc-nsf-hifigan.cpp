@@ -13,6 +13,28 @@ namespace pc_nsf_hifigan {
 
 namespace {
 
+// F32 im2col + mul_mat 1D conv: avoids ggml_conv_1d's F16 im2col on CPU and
+// is also much faster on Vulkan (ggml mul_mat is properly optimized there).
+// Returns the conv output reshaped to [OL, OC].
+ggml_tensor * conv1d_f32(ggml_context * ctx, ggml_tensor * w, ggml_tensor * x,
+                         int pad, int dil) {
+    ggml_tensor * im = ggml_im2col(ctx, w, x, 1, 0, pad, 0, dil, 0, false, GGML_TYPE_F32);
+    ggml_tensor * m0 = ggml_reshape_2d(ctx, im, im->ne[0], (im->ne[2] * im->ne[1]));
+    ggml_tensor * wm = ggml_reshape_2d(ctx, w, (w->ne[0] * w->ne[1]), w->ne[2]);
+    ggml_tensor * r = ggml_mul_mat(ctx, m0, wm);
+    r = ggml_reshape_3d(ctx, r, im->ne[1], w->ne[2], im->ne[2]);
+    return ggml_reshape_2d(ctx, r, r->ne[0], r->ne[1]);
+}
+
+// Default policy: use conv1d_f32 on every backend except CUDA (where the stock
+// ggml conv1d kernel is already optimized).  PCNSF_MANUAL_CONV=1/0 overrides.
+inline bool use_manual_conv(const GGUFModel & m) {
+    const char * pcnsf_manual = getenv("PCNSF_MANUAL_CONV");
+    const char * backend_name = ggml_backend_name(m.backend);
+    const bool is_cuda = backend_name && std::strstr(backend_name, "CUDA");
+    return pcnsf_manual ? pcnsf_manual[0] != '0' : !is_cuda;
+}
+
 // Conv1d "same" (pad = (K/2)*dilation, matching torch get_padding for odd K),
 // kernel layout [K, IC, OC], data layout [T, IC] -> [T', OC].
 // `ctype` selects the storage precision of the kernel: GGML_TYPE_F32 (exact
@@ -25,23 +47,11 @@ ggml_tensor * conv1d_same(ggml_context * ctx, const GGUFModel & m, ggml_type cty
     ggml_tensor * w = gguf_get(m, prefix + ".weight");
     if (w->type != ctype) w = ggml_cast(ctx, w, ctype);
     const int pad = (int) (w->ne[0] / 2) * dilation;
-    // Use an F32 im2col + mul_mat instead of ggml_conv_1d on non-CUDA
-    // backends.  ggml_conv_1d's im2col is F16 which is slow on CPU and Vulkan
-    // (measured: CPU 21.8->17.7s, Vulkan 18.7->2.56s for a 20s clip, diff
-    // <=1e-6/9e-3 vs the fp32 reference).  On CUDA the stock conv1d kernel is
-    // already optimized, so keep it there.  PCNSF_MANUAL_CONV=1/0 overrides.
-    const char * pcnsf_manual = getenv("PCNSF_MANUAL_CONV");
-    const char * backend_name = ggml_backend_name(m.backend);
-    const bool is_cuda = backend_name && std::strstr(backend_name, "CUDA");
-    const bool manual_conv = pcnsf_manual ? pcnsf_manual[0] != '0' : !is_cuda;
+    // F32 im2col+mul_mat is faster than ggml's F16-im2col conv1d on CPU/Vulkan
+    // (CPU 21.8->17.7s, Vulkan 18.7->2.56s for a 20s clip); CUDA keeps stock.
     ggml_tensor * y;
-    if (manual_conv) {
-        ggml_tensor * im = ggml_im2col(ctx, w, x, 1, 0, pad, 0, dilation, 0, false, GGML_TYPE_F32);
-        ggml_tensor * m0 = ggml_reshape_2d(ctx, im, im->ne[0], (im->ne[2] * im->ne[1]));
-        ggml_tensor * wm = ggml_reshape_2d(ctx, w, (w->ne[0] * w->ne[1]), w->ne[2]);
-        ggml_tensor * r = ggml_mul_mat(ctx, m0, wm);
-        r = ggml_reshape_3d(ctx, r, im->ne[1], w->ne[2], im->ne[2]);
-        y = ggml_reshape_2d(ctx, r, r->ne[0], r->ne[1]);
+    if (use_manual_conv(m)) {
+        y = conv1d_f32(ctx, w, x, pad, dilation);
     } else {
         y = ggml_conv_1d(ctx, w, x, 1, pad, dilation);
         y = ggml_reshape_2d(ctx, y, y->ne[0], y->ne[1]);
@@ -86,10 +96,10 @@ ggml_tensor * conv_transpose1d_crop(ggml_context * ctx, const GGUFModel & m,
 
 // Sub-pixel upsample: an EXACT, backend-portable replacement for
 // ggml_conv_transpose_1d (conv1d + phase interleave).  The converter emits
-// `hifigan.upsub.N.weight` with channels ordered PHASE-FAST (c = r + s*o), so
-// the graph below needs no host-side scatter:
+// `hifigan.upsub.N.weight` with channels ordered PHASE-MAJOR (c = r*Cout + o)
+// and TILED bias (bias.repeat(s)); the interleave below yields
 //   z    = conv1d(W_sub, x, pad = M-1)
-//   out[t*s+r, o] = z[t, r + s*o]          via permute/cont/reshape
+//   out[t*s+r, o] = z[t, r*Cout + o]          via permute/cont/reshape
 // This matches torch ConvTranspose1d bit-for-bit (fp32), and works on every
 // backend that supports ggml_conv_1d / cont (CPU/CUDA/Vulkan/Metal).
 ggml_tensor * upsample_subpixel(ggml_context * ctx, const GGUFModel & m, ggml_type ctype,
@@ -104,18 +114,19 @@ ggml_tensor * upsample_subpixel(ggml_context * ctx, const GGUFModel & m, ggml_ty
     const int Cout = CS / stride;
     const int L0 = (int) x->ne[0];
 
-    ggml_tensor * y = ggml_conv_1d(ctx, w, x, 1, M - 1, 1);
+    ggml_tensor * y = use_manual_conv(m) ? conv1d_f32(ctx, w, x, M - 1, 1)
+                                         : ggml_conv_1d(ctx, w, x, 1, M - 1, 1);
     y = ggml_reshape_2d(ctx, y, y->ne[0], y->ne[1]);
     ggml_tensor * b = ggml_reshape_2d(ctx, gguf_get(m, std::string(pre) + ".bias"), 1, CS);
     y = ggml_add(ctx, y, b);
     const int Lt = (int) y->ne[0];
 
-    // phase interleave: out[(t*s+r), o] = z[t, r + s*o]
-    ggml_tensor * y3 = ggml_reshape_3d(ctx, y, Lt, stride, Cout);   // [Lt, s, Cout]
-    ggml_tensor * yp = ggml_permute(ctx, y3, 1, 0, 2, 3);           // [s, Lt, Cout]
-    ggml_tensor * yc = ggml_cont(ctx, yp);                          // dense copy
+    // phase interleave: out[(t*s+r), o] = z[t, r*Cout + o]   (phase-major)
+    ggml_tensor * y3 = ggml_reshape_3d(ctx, y, Lt, Cout, stride); // [Lt, Cout, s]
+    ggml_tensor * yp = ggml_permute(ctx, y3, 1, 2, 0, 3);         // [s, Lt, Cout]
+    ggml_tensor * yc = ggml_cont(ctx, yp);                        // dense copy
     const int64_t new_len = (int64_t) Lt * stride;
-    ggml_tensor * y2 = ggml_reshape_2d(ctx, yc, new_len, Cout);     // [Lt*s, Cout]
+    ggml_tensor * y2 = ggml_reshape_2d(ctx, yc, new_len, Cout);   // [Lt*s, Cout]
 
     // same crop as the legacy convT path
     const int crop = (kernel - stride) / 2;

@@ -11,8 +11,8 @@ Architecture (modules/nsf_hifigan/models.py Generator, mini_nsf=True):
 Tensor layout matches ggml conv ops (gguf-py reverses the numpy shape list
 into ggml ne order, so ne0 = K = the last numpy dim):
   convs   Conv1d [OC,IC,K]        -> ggml kernel [K,IC,OC]      (ne0=K)
-  ups     ConvTranspose1d [Cin,Cout,K] -> ggml kernel [K,Cout,Cin] (default)
-          (sub-pixel `hifigan.upsub.N` 是可选实验格式，默认不输出)
+  ups     stored as sub-pixel conv1d `hifigan.upsub.N` (phase-major, tiled bias)
+          -> ggml raw [Cout*s, Cin, M]; engine does graph interleave
   source  Conv1d 1->256 k1        -> [1,1,256]
 
 Quantization: this component is NOT quantized (per decision).  The converter
@@ -62,6 +62,32 @@ def convt1d_to_ggml(w: np.ndarray) -> np.ndarray:
     """PyTorch ConvTranspose1d [Cin, Cout, K] stored RAW (file ne0 = K,
     matching ggml_conv_transpose_1d's [K, Cout, Cin] layout)."""
     return np.ascontiguousarray(w, dtype=np.float32)
+
+
+def deconv1d_as_subpixel(weight: np.ndarray, bias: np.ndarray, stride: int):
+    """Split ConvTranspose1d into per-phase conv1d kernels (EXACT, numpy).
+
+    Phase-major channel c = r*Cout + o (r = phase, o = output channel).  Bias
+    must be TILED (bias.repeat(s), concatenated) so channel r*Cout+o gets
+    b[o] -- np.repeat (interleave) is wrong and silently mismatches torch.
+    """
+    Cin, Cout, K = weight.shape
+    s, M = stride, (K + stride - 1) // stride
+    W_sub = np.zeros((Cin, Cout * s, M), dtype=np.float32)
+    for r in range(s):
+        sl = slice(r * Cout, (r + 1) * Cout)
+        for m in range(M):
+            k = r + s * m
+            if k < K:
+                W_sub[:, sl, (M - 1) - m] = weight[:, :, k]
+    b_sub = np.tile(bias, s).astype(np.float32)
+    return W_sub, b_sub
+
+
+def subpixel_to_ggml(ws: np.ndarray) -> np.ndarray:
+    """Phase-major [Cin, r*Cout+o, M] -> GGUF raw [Cout*s, Cin, M]
+    (file ne0 = M taps, ne1 = Cin, ne2 = Cout*s)."""
+    return np.ascontiguousarray(ws.transpose(1, 0, 2), dtype=np.float32)
 
 
 def write_gguf(path: str, arch: str, tensors: dict, meta: dict, dtype: str):
@@ -116,11 +142,19 @@ def main():
         w = sd[k]
         if k.endswith("num_batches_tracked"):
             continue
-        if k.endswith(".weight"):
-            if k.startswith("ups."):
-                tensors["hifigan." + k] = convt1d_to_ggml(w)   # [K,Cout,Cin]
-            else:
-                tensors["hifigan." + k] = conv1d_to_ggml(w)    # [K,IC,OC]
+        if k.endswith(".weight") and k.startswith("ups."):
+            # Sub-pixel (phase-major) upsample instead of ConvTranspose1d:
+            # a regular conv1d + graph interleave, which rides the fast F32
+            # im2col+mul_mat path.  Exact vs torch (see docs/verification_*).
+            idx = int(k.split(".")[1])
+            s = int(cfg["upsample_rates"][idx])
+            base = k[: -len(".weight")]
+            bias = sd[base + ".bias"]
+            Ws, bs = deconv1d_as_subpixel(w, bias, s)
+            tensors[f"hifigan.upsub.{idx}.weight"] = subpixel_to_ggml(Ws)   # [CS,Cin,M]
+            tensors[f"hifigan.upsub.{idx}.bias"]   = bs                     # [CS] (tiled)
+        elif k.endswith(".weight"):
+            tensors["hifigan." + k] = conv1d_to_ggml(w)    # [K,IC,OC]
         elif k.endswith(".bias"):
             tensors["hifigan." + k] = np.ascontiguousarray(w, dtype=np.float32)
         else:
@@ -139,6 +173,7 @@ def main():
         "hifigan.resblock_kernels": [float(x) for x in cfg["resblock_kernel_sizes"]],
         "hifigan.resblock_dilations": [float(x) for x in cfg["resblock_dilation_sizes"][0]],
         "hifigan.mini_nsf": bool(cfg.get("mini_nsf", True)),
+        "hifigan.subpixel": True,
         "hifigan.noise_sigma": float(cfg.get("noise_sigma", 0.0)),
         "hifigan.lrelu_slope": 0.1,
         "hifigan.source_sr": float(cfg["sampling_rate"] / np.prod(cfg["upsample_rates"][2:])),

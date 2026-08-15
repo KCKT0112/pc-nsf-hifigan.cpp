@@ -22,18 +22,20 @@ x = LReLU(x, 0.01); x = conv_post(Conv1d 16->1 k7 pad3); x = tanh(x)
 | 组件 | torch 布局 | ggml kernel ne | ggml op |
 |------|------------|----------------|---------|
 | convs  | [OC,IC,K]  | [K,IC,OC]      | `ggml_conv_1d(s=1,p=K/2*dil,dil)` |
-| ups    | [Cin,Cout,K]| 默认 `hifigan.ups.N` [K,Cout,Cin]（legacy convT）；可选 sub-pixel `hifigan.upsub.N` [Cout*s,Cin,M]（相位快 `c=r+s*o`） | `ggml_conv_transpose_1d` + crop，或 `ggml_conv_1d` + graph interleave |
+| ups    | [Cin,Cout,K]| 默认 sub-pixel `hifigan.upsub.N` [Cout*s,Cin,M]（相位主序 `c=r*Cout+o`，bias 为 tile）；legacy `hifigan.ups.N` [K,Cout,Cin] 仅旧模型回退 | `ggml_conv_1d`（F32 im2col+mul_mat）+ graph interleave；或 convT 回退 |
 | source | [1,1,256]  | [1,1,256]      | `ggml_mul_mat`（1x1 conv） |
 
 - **conv 层**：`ggml_conv_1d` 的最终 reshape 假定 `c_out==OW`（官方实现），本
   模型大多数 conv c_out≠OW，因此对每个 conv 都显式 `reshape_2d` 到
   `[ne0, ne1]`。实测 CPU 正确（DOUBLE_CONV check；CUDA 需 ggml-patch）。
-- **ups（默认 = legacy convT）**：converter 默认输出 `hifigan.ups.N`，
-  引擎走 `ggml_conv_transpose_1d(p0=0)` + crop `(K-s)/2`。这条路径在真实
-  权重下与 torch 高度一致（corr>0.9999，见 `verification_real_hifigan.md`）。
-- **ups（可选 sub-pixel）**：引擎检测到 `hifigan.upsub.0.weight` 时走
-  sub-pixel（`ggml_conv_1d` + graph interleave），converter 尚未产出该格式
-  （处于实验修复中）。
+- **ups（默认 = sub-pixel，相位主序）**：converter 默认输出
+  `hifigan.upsub.N`（W_sub 相位主序 `c=r*Cout+o`，bias 用 `bias.repeat(s)`
+  tile——早期 `np.repeat` 错误导致 subpixel 全链路 corr 0.696，已修）。引擎
+  用 F32 im2col+mul_mat conv1d + `reshape[Lt,Cout,s]->permute(1,2,0,3)->
+  cont->reshape[Lt*s,Cout]` 完成 interleave 并 crop。真实数据与 torch corr
+  0.99999+，且因为复用 F32 mul_mat，CPU/Vulkan 都比 legacy convT 更快。
+- **ups（legacy convT 回退）**：旧 GGUF 仍走 `ggml_conv_transpose_1d(p0=0)` +
+  crop `(K-s)/2`，用于兼容不再产出该格式的旧模型。
 - **source conv 1x1**：`mul_mat` 路径（B 必须 F32，权重在 A），输入
   `[IC,T]` transpose 后 `mul_mat(W[IC,OC], xt)` → `[OC,T]` → transpose +
   bias，等价 torch conv1d(k1)。
@@ -75,11 +77,10 @@ gguf_init(no_alloc=false) 自带内存。GPU 后端：遍历 meta ctx tensor，
   在 CPU 上以 fp32 计算，因此实际语义为 **fp16 权重 + fp32 计算**
   （bias 恒为 F32）。本实现不启动 fp16 激活计算——ggml conv1d 要求激活
   为 fp32，未来若上游支持 fp16 激活再升级。
-- **sub-pixel 实验说明**：sub-pixel 走 `ggml_conv_1d`，其 im2col 内部在 CPU
-  以 **fp16** 累积（ggml v0.19 行为）；stage 冒烟可达 rms 5e-4/max 1e-3，
-  但 **真实变长输入全链路仍不正确（corr 0.696）**——在修复前 converter
-  默认不输出 `hifigan.upsub.*`，引擎仍用 legacy convT（`ggml_conv_transpose_1d`，
-  与 torch corr>0.9999）。
+- **sub-pixel（已修复，默认）**：sub-pixel 的 conv1d 在非 CUDA 后端走 F32
+  im2col + mul_mat（CPU/Vulkan 实测比 legacy convT 更快且精度 corr>0.99999）。
+  之前“全链路 corr 0.696”的根因是 **bias 复制用错**（应 `bias.repeat(s)`
+  的 tile，而非 repeat_interleave），已修。
 - **无量化**：GB 由「hifigan 不量化」策略固定（与 VR/RMVPE 不同，那两者
   才会 Q8/Q4 消融）。未来 fp16 训练后仍保持此接口。
 
