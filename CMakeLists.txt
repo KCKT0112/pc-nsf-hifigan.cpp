@@ -42,7 +42,9 @@ if(MSVC)
         set(CMAKE_LIBRARY_OUTPUT_DIRECTORY_${_CFG} "${CMAKE_BINARY_DIR}/bin")
         set(CMAKE_ARCHIVE_OUTPUT_DIRECTORY_${_CFG} "${CMAKE_BINARY_DIR}/lib")
     endforeach()
-    add_compile_options(/utf-8)
+    # MSVC-only flag; must NOT reach NVCC (a bare /utf-8 token makes nvcc
+    # treat it as an extra input file -> "A single input file is required").
+    add_compile_options($<$<COMPILE_LANGUAGE:C,CXX>:/utf-8>)
 endif()
 
 if(MSVC)
