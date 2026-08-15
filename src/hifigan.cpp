@@ -17,7 +17,9 @@ namespace {
 ggml_tensor * conv1d_same(ggml_context * ctx, const GGUFModel & m,
                           const std::string & prefix, ggml_tensor * x, int dilation = 1) {
     ggml_tensor * w = gguf_get(m, prefix + ".weight");
-    if (w->type != GGML_TYPE_F16) w = ggml_cast(ctx, w, GGML_TYPE_F16);
+    // Vocoder is numerically sensitive: weigh weights AND compute in F32.
+    // (F16 kernels were a Vulkan-shader-era shortcut; we do not use them.)
+    if (w->type != GGML_TYPE_F32) w = ggml_cast(ctx, w, GGML_TYPE_F32);
     const int pad = (int) (w->ne[0] / 2) * dilation;
     ggml_tensor * y = ggml_conv_1d(ctx, w, x, 1, pad, dilation);
     y = ggml_reshape_2d(ctx, y, y->ne[0], y->ne[1]);
