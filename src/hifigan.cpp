@@ -25,8 +25,27 @@ ggml_tensor * conv1d_same(ggml_context * ctx, const GGUFModel & m, ggml_type cty
     ggml_tensor * w = gguf_get(m, prefix + ".weight");
     if (w->type != ctype) w = ggml_cast(ctx, w, ctype);
     const int pad = (int) (w->ne[0] / 2) * dilation;
-    ggml_tensor * y = ggml_conv_1d(ctx, w, x, 1, pad, dilation);
-    y = ggml_reshape_2d(ctx, y, y->ne[0], y->ne[1]);
+    // Use an F32 im2col + mul_mat instead of ggml_conv_1d on non-CUDA
+    // backends.  ggml_conv_1d's im2col is F16 which is slow on CPU and Vulkan
+    // (measured: CPU 21.8->17.7s, Vulkan 18.7->2.56s for a 20s clip, diff
+    // <=1e-6/9e-3 vs the fp32 reference).  On CUDA the stock conv1d kernel is
+    // already optimized, so keep it there.  PCNSF_MANUAL_CONV=1/0 overrides.
+    const char * pcnsf_manual = getenv("PCNSF_MANUAL_CONV");
+    const char * backend_name = ggml_backend_name(m.backend);
+    const bool is_cuda = backend_name && std::strstr(backend_name, "CUDA");
+    const bool manual_conv = pcnsf_manual ? pcnsf_manual[0] != '0' : !is_cuda;
+    ggml_tensor * y;
+    if (manual_conv) {
+        ggml_tensor * im = ggml_im2col(ctx, w, x, 1, 0, pad, 0, dilation, 0, false, GGML_TYPE_F32);
+        ggml_tensor * m0 = ggml_reshape_2d(ctx, im, im->ne[0], (im->ne[2] * im->ne[1]));
+        ggml_tensor * wm = ggml_reshape_2d(ctx, w, (w->ne[0] * w->ne[1]), w->ne[2]);
+        ggml_tensor * r = ggml_mul_mat(ctx, m0, wm);
+        r = ggml_reshape_3d(ctx, r, im->ne[1], w->ne[2], im->ne[2]);
+        y = ggml_reshape_2d(ctx, r, r->ne[0], r->ne[1]);
+    } else {
+        y = ggml_conv_1d(ctx, w, x, 1, pad, dilation);
+        y = ggml_reshape_2d(ctx, y, y->ne[0], y->ne[1]);
+    }
     ggml_tensor * b = ggml_reshape_2d(ctx, gguf_get(m, prefix + ".bias"), 1, y->ne[1]);
     return ggml_add(ctx, y, b);
 }

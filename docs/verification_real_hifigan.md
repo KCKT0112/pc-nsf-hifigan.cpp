@@ -36,19 +36,19 @@
 
 | 后端 | 耗时 | RTF | 备注 |
 |---|---|---|---|
-| ggml CPU F32 sub-pixel（4 线程） | 54681 ms | ≈2.7x 慢于实时 | **CPU 性能不满足实时/加速** |
-| ggml CPU F32 convT（4 线程） | 55096 ms | ≈2.8x 慢于实时 | 与 sub-pixel 相当，非 sub-pixel 特有 |
-| ggml CPU F32 convT（16 线程） | 21809 ms | ≈1.09x（勉强实时） | `HF_THREADS=16` 后约 2.4x 提升 |
-| ggml CPU F16 convT（16 线程） | 22815 ms | ≈1.14x | 权重 fp16 但计算仍 fp32，无额外提速 |
-| ggml Vulkan F32 convT（RTX 2070） | 18742 ms | ≈0.94x | Vulkan 后端比 16 线程 CPU 略快一点，仍远不及 torch CUDA |
-| ggml CUDA F32 convT（RTX 2070） | 1378 ms | 0.069（≈14.5x 实时） | CUDA 后端真正可用，仍约为 torch CUDA 的 2.5x |
+| ggml CPU F32 convT（4 线程，旧 im2col） | 55096 ms | ≈2.8x 慢于实时 | 提速前的失真基线 |
+| ggml CPU F32 convT（16 线程，旧 im2col） | 21809 ms | ≈1.09x | `HF_THREADS=16` |
+| **ggml CPU F32 convT（16 线程，F32 im2col+mul_mat）** | **17671 ms** | **≈0.88x（低于实时）** | 本轮 conv1d 提速 ~22%，corr 0.9999998 |
+| **ggml Vulkan F32 convT（F32 im2col+mul_mat）** | **2279 ms** | **0.114（≈8.8x 实时）** | 较旧 Vulkan 18.7s 提速 ~8x，corr 0.999991 |
+| ggml CUDA F32 convT（RTX 2070，保持原生 conv1d） | ~1378 ms | 0.069（≈14.5x 实时） | CUDA 用 stock ggml_conv_1d（F32 im2col 反而更慢） |
 | torch CUDA（同参数参考） | 557 ms | 0.028（36x 实时） | CUDA 正常加速 |
 
-> CLI 现在支持 `HF_THREADS`（默认 4）显式控制 ggml CPU 线程数。
+> CLI 支持 `HF_THREADS`（默认 4）控制 CPU 线程；新 CPU/Vulkan 路径通过
+> conv1d 改为 **F32 im2col + mul_mat**（`PCNSF_MANUAL_CONV=1/0` 可覆盖默认）。
 
-CPU 与 torch CUDA 差距巨大；CPU 路径是当前最大瓶颈，需按 conv/resblock 逐层
-profile（怀疑 conv1d 在 v0.19 CPU 上未并行 + 大中间 tensor 的
-`ggml_cont`/im2col 开销）。
+CPU（16 线程）已低于实时（RTF 0.88），Vulkan 提速至 RTF 0.114；CUDA 依旧最快
+（RTF 0.069）。相对 torch CUDA 仍慢 ~2.5-4x，下一步可在 GPU mul_mat 与
+convT 侧继续压（convT 仍走 ggml 原生，未做 F32 im2col 化）。
 
 ## Vulkan / CUDA 构建状态（本机均通过）
 
