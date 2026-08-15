@@ -10,7 +10,7 @@ An independent vocoder library for the DiffSinger `diffsinger.cpp` pipeline. Thi
 
 ## Feature highlights
 
-- **Native ggml ops** — `ggml_conv_1d` / `ggml_conv_transpose_1d` / `ggml_mul_mat` (source conv)
+- **Native ggml ops** — sub-pixel upsample via `ggml_conv_1d` + graph interleave (`ggml_conv_transpose_1d` kept only as legacy fallback), `ggml_mul_mat` for the source conv
 - **Multi-backend** — weights auto-uploaded to backend buffers (CPU/Vulkan/CUDA/Metal); device shaders never read CPU memory
 - **F16/F32 dual precision (no quantization)** — F32 line (weights+compute fp32, exact baseline) and F16 line (fp16 weights, reserved for future fp16/bf16 training pilots)
 - **Mel front-ends** — `mel_nvstft` (DiffSinger hifigan front-end) + `MelExtractor` (ecosystem API parity)

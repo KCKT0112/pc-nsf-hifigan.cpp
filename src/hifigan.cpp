@@ -64,6 +64,50 @@ ggml_tensor * conv_transpose1d_crop(ggml_context * ctx, const GGUFModel & m,
     return ggml_add(ctx, y, b);
 }
 
+// Sub-pixel upsample: an EXACT, backend-portable replacement for
+// ggml_conv_transpose_1d (conv1d + phase interleave).  The converter emits
+// `hifigan.upsub.N.weight` with channels ordered PHASE-FAST (c = r + s*o), so
+// the graph below needs no host-side scatter:
+//   z    = conv1d(W_sub, x, pad = M-1)
+//   out[t*s+r, o] = z[t, r + s*o]          via permute/cont/reshape
+// This matches torch ConvTranspose1d bit-for-bit (fp32), and works on every
+// backend that supports ggml_conv_1d / cont (CPU/CUDA/Vulkan/Metal).
+ggml_tensor * upsample_subpixel(ggml_context * ctx, const GGUFModel & m, ggml_type ctype,
+                                int idx, ggml_tensor * x, int stride, int kernel) {
+    char pre[64];
+    std::snprintf(pre, sizeof pre, "hifigan.upsub.%d", idx);
+    ggml_tensor * w = gguf_get(m, std::string(pre) + ".weight");
+    if (w->type != ctype) w = ggml_cast(ctx, w, ctype);
+    const int M  = (int) w->ne[0];         // phase-kernel taps
+    const int Cin = (int) w->ne[1];        // input channels
+    const int CS = (int) w->ne[2];         // Cout * stride, phase-fast
+    const int Cout = CS / stride;
+    const int L0 = (int) x->ne[0];
+
+    ggml_tensor * y = ggml_conv_1d(ctx, w, x, 1, M - 1, 1);
+    y = ggml_reshape_2d(ctx, y, y->ne[0], y->ne[1]);
+    ggml_tensor * b = ggml_reshape_2d(ctx, gguf_get(m, std::string(pre) + ".bias"), 1, CS);
+    y = ggml_add(ctx, y, b);
+    const int Lt = (int) y->ne[0];
+
+    // phase interleave: out[(t*s+r), o] = z[t, r + s*o]
+    ggml_tensor * y3 = ggml_reshape_3d(ctx, y, Lt, stride, Cout);   // [Lt, s, Cout]
+    ggml_tensor * yp = ggml_permute(ctx, y3, 1, 0, 2, 3);           // [s, Lt, Cout]
+    ggml_tensor * yc = ggml_cont(ctx, yp);                          // dense copy
+    const int64_t new_len = (int64_t) Lt * stride;
+    ggml_tensor * y2 = ggml_reshape_2d(ctx, yc, new_len, Cout);     // [Lt*s, Cout]
+
+    // same crop as the legacy convT path
+    const int crop = (kernel - stride) / 2;
+    const int64_t target_len = (int64_t) L0 * stride;
+    ggml_tensor * out = y2;
+    if (crop > 0) {
+        out = ggml_view_2d(ctx, out, target_len, Cout, out->nb[1], crop * out->nb[0]);
+        out = ggml_cont(ctx, out);
+    }
+    return out;
+}
+
 // ResBlock1: for each of 3 (k, d) pairs: lrelu -> conv(d) -> lrelu -> conv(1) -> add.
 // convs1 dilations [1,3,5]; convs2 always dilation 1.
 ggml_tensor * resblock(ggml_context * ctx, const GGUFModel & m, ggml_type ctype,
@@ -162,13 +206,19 @@ void hifigan_run(const HifiganModel & m, const float * mel, const float * f0, in
 
     ggml_cgraph * gf = ggml_new_graph_custom(ctx, GGML_DEFAULT_GRAPH_SIZE * 64, false);
 
+    // new-format GGUFs carry phase-split sub-pixel upsample tensors
+    const bool subpixel = gm.tensors.find("hifigan.upsub.0.weight") != gm.tensors.end();
+
     ggml_tensor * x = conv1d_same(ctx, gm, ctype, "hifigan.conv_pre", mel_in, 1);
     const int num_kernels = (int) m.resblock_kernels.size();
     for (int i = 0; i < m.num_upsamples; ++i) {
         x = ggml_leaky_relu(ctx, x, 0.1f, false);
         char pre[64];
         std::snprintf(pre, sizeof pre, "hifigan.ups.%d", i);
-        x = conv_transpose1d_crop(ctx, gm, ctype, pre, x, m.upsample_rates[i], m.upsample_kernels[i]);
+        const int s = m.upsample_rates[i];
+        const int K = m.upsample_kernels[i];
+        x = subpixel ? upsample_subpixel(ctx, gm, ctype, i, x, s, K)
+                     : conv_transpose1d_crop(ctx, gm, ctype, pre, x, s, K);
         if (i == 1) {
             ggml_tensor * xs = conv1d_k1(ctx, gm, ctype, "hifigan.source_conv", src_in);
             x = ggml_add(ctx, x, xs);

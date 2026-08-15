@@ -22,15 +22,21 @@ x = LReLU(x, 0.01); x = conv_post(Conv1d 16->1 k7 pad3); x = tanh(x)
 | 组件 | torch 布局 | ggml kernel ne | ggml op |
 |------|------------|----------------|---------|
 | convs  | [OC,IC,K]  | [K,IC,OC]      | `ggml_conv_1d(s=1,p=K/2*dil,dil)` |
-| ups    | [Cin,Cout,K]| [K,Cout,Cin]   | `ggml_conv_transpose_1d(s,p0=0,1)` + crop |
+| ups    | [Cin,Cout,K]| `hifigan.upsub.N` [Cout*s,Cin,M]（相位快 `c=r+s*o`） | `ggml_conv_1d` + **graph interleave**（`permute/cont/reshape`，无 host scatter） |
 | source | [1,1,256]  | [1,1,256]      | `ggml_mul_mat`（1x1 conv） |
 
 - **conv 层**：`ggml_conv_1d` 的最终 reshape 假定 `c_out==OW`（官方实现），本
   模型大多数 conv c_out≠OW，因此对每个 conv 都显式 `reshape_2d` 到
   `[ne0, ne1]`。实测 CPU 正确（DOUBLE_CONV check；CUDA 需 ggml-patch）。
-- **conv_transpose**：ggml `p0` 必须 0，故用 `p0=0` 后 crop 左侧 `(K-s)/2`
-  个样本。kernel cast 到 F32（Vulkan shader 要求 F32；CPU F16 也行但统一 F32）。
-  对应 torch `padding=(K-stride)/2` 的右侧 pad 由 ggml 原生处理。
+- **ups（sub-pixel 线路，新格式）**：converter 把 ConvTranspose1d 拆成
+  相位卷积核 `hifigan.upsub.N`，通道按**相位快**（`c = r + s*o`）存放，
+  引擎用 `ggml_conv_1d(pad=M-1)` 得出 `z[t,c]` 后，以
+  `reshape_3d [Lt,s,Cout] -> permute -> cont -> reshape_2d [Lt*s,Cout]`
+  在图中完成 interleave 并 crop `(K-s)/2`——数学上与 torch ConvTranspose1d
+  精确一致。这样绕开了 conv_transpose_1d 在 Vulkan/Metal/CUDA 上的算子
+  /patch 负担。
+- **conv_transpose（legacy 回退）**：旧 GGUF 仍在 CPU/支持路径可用；
+  ggml `p0` 必须 0，用 `p0=0` 后 crop 左侧 `(K-s)/2` 个样本。
 - **source conv 1x1**：`mul_mat` 路径（B 必须 F32，权重在 A），输入
   `[IC,T]` transpose 后 `mul_mat(W[IC,OC], xt)` → `[OC,T]` → transpose +
   bias，等价 torch conv1d(k1)。
@@ -72,6 +78,11 @@ gguf_init(no_alloc=false) 自带内存。GPU 后端：遍历 meta ctx tensor，
   在 CPU 上以 fp32 计算，因此实际语义为 **fp16 权重 + fp32 计算**
   （bias 恒为 F32）。本实现不启动 fp16 激活计算——ggml conv1d 要求激活
   为 fp32，未来若上游支持 fp16 激活再升级。
+- **sub-pixel 精度说明**：新格式的 upsample 走 `ggml_conv_1d`，其 im2col
+  内部在 CPU 上以 **fp16** 累积（ggml v0.19 行为），因此 sub-pixel 线路相对
+  torch fp32 的余差约 rms 5e-4 / max 1e-3（可听范围外）。若需 golden 级
+  逐位一致，使用不带 `hifigan.upsub.*` 的旧 GGUF（引擎自动回退
+  `ggml_conv_transpose_1d`，全 fp32）。
 - **无量化**：GB 由「hifigan 不量化」策略固定（与 VR/RMVPE 不同，那两者
   才会 Q8/Q4 消融）。未来 fp16 训练后仍保持此接口。
 
