@@ -77,7 +77,11 @@ def write_gguf(path: str, arch: str, tensors: dict, meta: dict, dtype: str):
             writer.add_array(k, [float(x) for x in v])
     for name in sorted(tensors.keys()):
         w = tensors[name]
-        if dtype == "F16":
+        # Bias stays F32 in every mode (engine ggml_add requires F32 bias;
+        # making it F16 breaks binary_op).  Only kernels are quantized to F16.
+        if name.endswith(".bias"):
+            writer.add_tensor(name, w.astype(np.float32), raw_dtype=QT.F32)
+        elif dtype == "F16":
             writer.add_tensor(name, w.astype(np.float16), raw_dtype=QT.F16)
         else:
             writer.add_tensor(name, w.astype(np.float32), raw_dtype=QT.F32)
@@ -92,8 +96,8 @@ def main():
     ap.add_argument("--ckpt", required=True, help="model.ckpt path")
     ap.add_argument("--config", required=True, help="config.json path")
     ap.add_argument("--out", required=True, help="output .gguf path")
-    ap.add_argument("--dtype", default="F16", choices=["F16", "F32"],
-                    help="kernel dtype (F16 = fp16 interface; F32 = debug/golden)")
+    ap.add_argument("--dtype", default="F32", choices=["F32"],
+                    help="kernel dtype (hifigan is numerically sensitive: weights AND compute must be F32; F16 is not for the vocoder)")
     args = ap.parse_args()
 
     ckpt_dir = os.path.dirname(args.ckpt)
