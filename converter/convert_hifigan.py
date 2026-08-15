@@ -11,8 +11,8 @@ Architecture (modules/nsf_hifigan/models.py Generator, mini_nsf=True):
 Tensor layout matches ggml conv ops (gguf-py reverses the numpy shape list
 into ggml ne order, so ne0 = K = the last numpy dim):
   convs   Conv1d [OC,IC,K]        -> ggml kernel [K,IC,OC]      (ne0=K)
-  ups     stored as sub-pixel conv1d `hifigan.upsub.N` [Cout*s,Cin,M]
-          with phase-fast channels c = r + s*o (engine does graph interleave)
+  ups     ConvTranspose1d [Cin,Cout,K] -> ggml kernel [K,Cout,Cin] (default)
+          (sub-pixel `hifigan.upsub.N` 是可选实验格式，默认不输出)
   source  Conv1d 1->256 k1        -> [1,1,256]
 
 Quantization: this component is NOT quantized (per decision).  The converter
@@ -62,47 +62,6 @@ def convt1d_to_ggml(w: np.ndarray) -> np.ndarray:
     """PyTorch ConvTranspose1d [Cin, Cout, K] stored RAW (file ne0 = K,
     matching ggml_conv_transpose_1d's [K, Cout, Cin] layout)."""
     return np.ascontiguousarray(w, dtype=np.float32)
-
-
-def deconv1d_as_subpixel(weight: np.ndarray, bias: np.ndarray, stride: int):
-    """Split ConvTranspose1d into per-phase conv1d kernels (EXACT, numpy).
-
-    weight: [Cin, Cout, K] (torch layout), bias [Cout]
-    Returns (W_sub [Cin, Cout*s, M], b_sub [Cout*s]) with phase-major channel
-    c = r*Cout + o.  M = ceil(K/s).
-    """
-    Cin, Cout, K = weight.shape
-    s, M = stride, (K + stride - 1) // stride
-    W_sub = np.zeros((Cin, Cout * s, M), dtype=np.float32)
-    for r in range(s):
-        sl = slice(r * Cout, (r + 1) * Cout)
-        for m in range(M):
-            k = r + s * m
-            if k < K:
-                W_sub[:, sl, (M - 1) - m] = weight[:, :, k]
-    b_sub = np.repeat(bias, s).astype(np.float32) if bias is not None else None
-    return W_sub, b_sub
-
-
-def subpixel_to_ggml_phase_fast(ws: np.ndarray, b: np.ndarray, s: int, Cout: int):
-    """Reorder phase-major W_sub (c=r*Cout+o) to phase-fast (c=r+s*o) and
-    return the ggml-ready kernel [CS, Cin, M] + replicated bias [CS].
-
-    ggml's dense [Lt, s, Cout] record nests the phase between time and output:
-    out[(t*s+r), o] = z[t, r + s*o], so channels must be stored phase-fast for
-    the graph-interleave (no host scatter) to be exact.
-    """
-    Cin, CS, M = ws.shape
-    out = np.zeros_like(ws)
-    ob = np.zeros_like(b)
-    for q in range(CS):
-        r = q % s
-        o = q // s
-        old = r * Cout + o
-        out[:, q, :] = ws[:, old, :]
-        ob[q] = b[old]
-    gg = np.ascontiguousarray(out.transpose(1, 0, 2), dtype=np.float32)  # [CS,Cin,M]
-    return gg, np.ascontiguousarray(ob, dtype=np.float32)
 
 
 def write_gguf(path: str, arch: str, tensors: dict, meta: dict, dtype: str):
@@ -157,20 +116,11 @@ def main():
         w = sd[k]
         if k.endswith("num_batches_tracked"):
             continue
-        if k.endswith(".weight") and k.startswith("ups."):
-            # Store the EXACT sub-pixel equivalent (regular conv1d + phase
-            # interleave) instead of ConvTranspose1d: ggml conv_transpose_1d
-            # is the least portable op in the engine's backend set.
-            idx = int(k.split(".")[1])
-            s = int(cfg["upsample_rates"][idx])
-            base = k[: -len(".weight")]
-            bias = sd[base + ".bias"]
-            Ws, bs = deconv1d_as_subpixel(w, bias, s)
-            gg, ob = subpixel_to_ggml_phase_fast(Ws, bs, s, w.shape[1])
-            tensors[f"hifigan.upsub.{idx}.weight"] = gg          # [CS,Cin,M]
-            tensors[f"hifigan.upsub.{idx}.bias"]   = ob          # [CS]
-        elif k.endswith(".weight"):
-            tensors["hifigan." + k] = conv1d_to_ggml(w)    # [K,IC,OC]
+        if k.endswith(".weight"):
+            if k.startswith("ups."):
+                tensors["hifigan." + k] = convt1d_to_ggml(w)   # [K,Cout,Cin]
+            else:
+                tensors["hifigan." + k] = conv1d_to_ggml(w)    # [K,IC,OC]
         elif k.endswith(".bias"):
             tensors["hifigan." + k] = np.ascontiguousarray(w, dtype=np.float32)
         else:
@@ -189,7 +139,6 @@ def main():
         "hifigan.resblock_kernels": [float(x) for x in cfg["resblock_kernel_sizes"]],
         "hifigan.resblock_dilations": [float(x) for x in cfg["resblock_dilation_sizes"][0]],
         "hifigan.mini_nsf": bool(cfg.get("mini_nsf", True)),
-        "hifigan.subpixel": True,
         "hifigan.noise_sigma": float(cfg.get("noise_sigma", 0.0)),
         "hifigan.lrelu_slope": 0.1,
         "hifigan.source_sr": float(cfg["sampling_rate"] / np.prod(cfg["upsample_rates"][2:])),

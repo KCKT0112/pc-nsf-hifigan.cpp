@@ -56,9 +56,9 @@ profile（怀疑 conv1d 在 v0.19 CPU 上未并行 + 大中间 tensor 的
 
 ## 结论 / 建议
 
-1. **可靠默认仍是 legacy convT**：真实权重下与 torch corr>0.9999。
-   仓库当前 converter 默认已改为 sub-pixel——这是**发布阻断项**，建议
-   在修复 sub-pixel 数值前把 converter 默认切回 convT（或仅 F16 用 sub-pixel）。
+1. **可靠默认已是 legacy convT**：真实权重下与 torch corr>0.9999。
+   本会话已把 converter 默认切回 convT（不再输出 `hifigan.upsub.*`）；
+   sub-pixel 保留为实验中格式，修复后再启用。
 2. **CPU 目前无法达到“加速”目标**（RTF≈2.7），下一步应 profile
    conv1d/resblock 与 `ggml_cont`，评估多线程与算子替换（如提前
    im2col+fp32 mul_mat）。
