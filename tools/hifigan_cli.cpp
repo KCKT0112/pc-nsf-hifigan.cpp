@@ -47,9 +47,11 @@ static bool write_wav(const std::string & path, const float * data, size_t n,
     return written == n;
 }
 
+static int hf_threads() { const char * s = getenv("HF_THREADS"); int n = s ? std::atoi(s) : 4; return n > 0 ? n : 4; }
+
 static int vocode(const char * gguf, const char * melp, const char * f0p, const char * outp) {
     const char * prec = getenv("HF_PRECISION");
-    pc_nsf_hifigan::HifiganModel m(gguf, 4, (prec && *prec) ? prec : "F32");
+    pc_nsf_hifigan::HifiganModel m(gguf, hf_threads(), (prec && *prec) ? prec : "F32");
     std::vector<float> mel, f0;
     if (!read_raw(melp, mel) || !read_raw(f0p, f0)) return 1;
     const int T = (int) f0.size();
@@ -75,7 +77,7 @@ static int vocode(const char * gguf, const char * melp, const char * f0p, const 
 static int run_batch(const char * gguf, const char * list, const char * outdir,
                      int warmup) {
     const char * prec = getenv("HF_PRECISION");
-    pc_nsf_hifigan::HifiganModel m(gguf, 4, (prec && *prec) ? prec : "F32");
+    pc_nsf_hifigan::HifiganModel m(gguf, hf_threads(), (prec && *prec) ? prec : "F32");
     std::ifstream in(list);
     std::string line;
     int idx = 0;

@@ -36,7 +36,11 @@
 |---|---|---|---|
 | ggml CPU F32 sub-pixel（4 线程） | 54681 ms | ≈2.7x 慢于实时 | **CPU 性能不满足实时/加速** |
 | ggml CPU F32 convT（4 线程） | 55096 ms | ≈2.8x 慢于实时 | 与 sub-pixel 相当，非 sub-pixel 特有 |
+| ggml CPU F32 convT（16 线程） | 21809 ms | ≈1.09x（勉强实时） | `HF_THREADS=16` 后约 2.4x 提升 |
+| ggml CPU F16 convT（16 线程） | 22815 ms | ≈1.14x | 权重 fp16 但计算仍 fp32，无额外提速 |
 | torch CUDA（同参数参考） | 557 ms | 0.028（36x 实时） | CUDA 正常加速 |
+
+> CLI 现在支持 `HF_THREADS`（默认 4）显式控制 ggml CPU 线程数。
 
 CPU 与 torch CUDA 差距巨大；CPU 路径是当前最大瓶颈，需按 conv/resblock 逐层
 profile（怀疑 conv1d 在 v0.19 CPU 上未并行 + 大中间 tensor 的
@@ -59,9 +63,10 @@ profile（怀疑 conv1d 在 v0.19 CPU 上未并行 + 大中间 tensor 的
 1. **可靠默认已是 legacy convT**：真实权重下与 torch corr>0.9999。
    本会话已把 converter 默认切回 convT（不再输出 `hifigan.upsub.*`）；
    sub-pixel 保留为实验中格式，修复后再启用。
-2. **CPU 目前无法达到“加速”目标**（RTF≈2.7），下一步应 profile
-   conv1d/resblock 与 `ggml_cont`，评估多线程与算子替换（如提前
-   im2col+fp32 mul_mat）。
+2. **CPU 目前只到“勉强实时”**（16 线程 F32 21.8s/20s≈RTF 1.09）：已加
+   `HF_THREADS` 控制线程数；要进一步需 profile
+   conv1d/resblock 与 `ggml_cont`，评估多线程与算子替换（如预留
+   im2col+fp32 mul_mat、避免每层大 cont copy）。
 3. **CUDA/Vulkan 未在本机验证**：工具链阻碍明确，建议在带 VS2022/Ninja 的 CI
    或机器上补跑 E2E 数值与 RTF。
 
