@@ -34,15 +34,22 @@ static bool read_raw(const std::string & path, std::vector<float> & out) {
 
 static bool write_wav(const std::string & path, const float * data, size_t n,
                       int sample_rate) {
+    drwav_data_format fmt = {};
+    fmt.container     = drwav_container_riff;
+    fmt.format        = DR_WAVE_FORMAT_IEEE_FLOAT;
+    fmt.channels      = 1;
+    fmt.sampleRate    = (drwav_uint32) sample_rate;
+    fmt.bitsPerSample = 32;
     drwav w;
-    if (!drwav_init_file_write(&w, path.c_str(), nullptr, nullptr)) return false;
+    if (!drwav_init_file_write(&w, path.c_str(), &fmt, nullptr)) return false;
     drwav_uint64 written = drwav_write_pcm_frames(&w, (drwav_uint64) n, data);
     drwav_uninit(&w);
     return written == n;
 }
 
 static int vocode(const char * gguf, const char * melp, const char * f0p, const char * outp) {
-    pc_nsf_hifigan::HifiganModel m(gguf, 4);
+    const char * prec = getenv("HF_PRECISION");
+    pc_nsf_hifigan::HifiganModel m(gguf, 4, (prec && *prec) ? prec : "F32");
     std::vector<float> mel, f0;
     if (!read_raw(melp, mel) || !read_raw(f0p, f0)) return 1;
     const int T = (int) f0.size();
@@ -53,6 +60,12 @@ static int vocode(const char * gguf, const char * melp, const char * f0p, const 
     }
     std::vector<float> wav;
     pc_nsf_hifigan::hifigan_run(m, mel.data(), f0.data(), T, wav);
+    const char * raw_out = getenv("HF_RAW_OUT");
+    if (raw_out && *raw_out) {
+        FILE * f = std::fopen(raw_out, "wb");
+        if (f) { std::fwrite(wav.data(), 4, wav.size(), f); std::fclose(f);
+                 std::fprintf(stderr, "[cli] raw f32 written to %s (%zu samples)\n", raw_out, wav.size()); }
+    }
     write_wav(outp, wav.data(), wav.size(), m.sampling_rate);
     std::printf("wrote %s : %zu samples (%.2f s @ %d Hz)\n", outp,
                 wav.size(), (double) wav.size() / m.sampling_rate, m.sampling_rate);
@@ -61,7 +74,8 @@ static int vocode(const char * gguf, const char * melp, const char * f0p, const 
 
 static int run_batch(const char * gguf, const char * list, const char * outdir,
                      int warmup) {
-    pc_nsf_hifigan::HifiganModel m(gguf, 4);
+    const char * prec = getenv("HF_PRECISION");
+    pc_nsf_hifigan::HifiganModel m(gguf, 4, (prec && *prec) ? prec : "F32");
     std::ifstream in(list);
     std::string line;
     int idx = 0;

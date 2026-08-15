@@ -12,7 +12,7 @@
 
 - **原生 ggml 算子** — `ggml_conv_1d` / `ggml_conv_transpose_1d` / `ggml_mul_mat`（source conv）
 - **多后端** — 权重自动上传到后端 buffer（CPU/Vulkan/CUDA/Metal 通用），设备 shader 不读 CPU 内存
-- **仅 F16/F32** — 无量化接口（fp16 训练试点预留）
+- **F16/F32 双线路（不量化）** — F32 线路（权重+计算 fp32，精确基线）；F16 线路（权重 fp16，为未来 fp16/bf16 训练试点预留）
 - **Mel 前端** — `mel_nvstft`（DiffSinger hifigan 前端）+ `MelExtractor`（生态 API parity）
 - **CLI + CTest** — 单条/批量 vocode + CTest golden 校验（纯 numpy 参考，无需模型资产）
 
@@ -28,6 +28,8 @@ cmake --build build -j
 
 # 3. vocode（mel.bin + f0.bin -> out.wav）
 build/bin/hifigan_cli hifigan.gguf mel.bin f0.bin out.wav
+#    F16 线路（需 --dtype F16 的 GGUF）：
+# HF_PRECISION=F16 build/bin/hifigan_cli hifigan_f16.gguf mel.bin f0.bin out_f16.wav
 ```
 
 ## 生态定位
@@ -46,12 +48,12 @@ build/bin/hifigan_cli hifigan.gguf mel.bin f0.bin out.wav
 ## 模型发布
 
 本仓库是生态中的**量化例外**：vocoder 对数值敏感，只产出两种精度
-（`converter/convert_hifigan.py --quant f16|f32`），**没有** `rec`/Q8 档。
+（`converter/convert_hifigan.py --dtype F32|F16`），**没有** `rec`/Q8 档。
 
 | 资产 | 精度 | 使用场景 |
 |---|---|---|
-| `hifigan_f16.gguf` | F16（默认） | 常规部署 |
-| `hifigan_f32.gguf` | F32 | golden 级回归基线 |
+| `hifigan_f16.gguf` | F16（fp16 线路） | 常规部署（权重 fp16） |
+| `hifigan_f32.gguf` | F32（精确线路） | golden 级回归基线 |
 
 - 通过 GitHub **Releases** 发布，权重不提交进仓库。
 - 文件名必须带精度后缀（`f16` / `f32`）——消费者按 size glob（如

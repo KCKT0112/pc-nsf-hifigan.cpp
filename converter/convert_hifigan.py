@@ -15,8 +15,9 @@ into ggml ne order, so ne0 = K = the last numpy dim):
   source  Conv1d 1->256 k1        -> [1,1,256]
 
 Quantization: this component is NOT quantized (per decision).  The converter
-offers F32 (exact golden) and F16 (default, matches what the engine targets);
-a future fp16-trained checkpoint keeps the same interface.
+offers F32 (exact golden; weights and compute in fp32) and, reserved for
+future fp16/bf16-trained checkpoints, an F16 line (kernels fp16, bias stays
+F32).  See the engine's Precision class for how each line is executed.
 
 Only third-party deps are torch + gguf (Python package) + numpy.
 """
@@ -96,8 +97,8 @@ def main():
     ap.add_argument("--ckpt", required=True, help="model.ckpt path")
     ap.add_argument("--config", required=True, help="config.json path")
     ap.add_argument("--out", required=True, help="output .gguf path")
-    ap.add_argument("--dtype", default="F32", choices=["F32"],
-                    help="kernel dtype (hifigan is numerically sensitive: weights AND compute must be F32; F16 is not for the vocoder)")
+    ap.add_argument("--dtype", default="F32", choices=["F32", "F16"],
+                    help="kernel dtype. F32 = exact golden default (weights AND compute in fp32); F16 = reserved for future fp16/bf16-trained checkpoints (bias always stays F32)")
     args = ap.parse_args()
 
     ckpt_dir = os.path.dirname(args.ckpt)

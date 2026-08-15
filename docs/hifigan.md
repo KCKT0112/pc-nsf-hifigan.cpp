@@ -60,10 +60,18 @@ gguf_init(no_alloc=false) 自带内存。GPU 后端：遍历 meta ctx tensor，
 本仓库的 CPU/F16 路径本身无量化，GPU 上按设备 F32/F16 精度计算，无精度
 损失（vocoder 峰值 buffer 通常 << 1GB）。
 
-## 5. 精度策略
+## 5. 精度策略（双线路）
 
-- **F32**：converter 输出 `--dtype F32`，用于 golden/debug（全精度）。
-- **F16**：默认。GGUF 存 F16，载入后 conv kernel 可能仍 F16；source conv F32。
+引擎通过 `HifiganModel(path, n_threads, precision)` 选择线路（CLI 用
+`HF_PRECISION` 环境变量），converter 用 `--dtype` 产出对应 GGUF：
+
+- **F32 线路（默认）**：`--dtype F32`；权重读取 F32、所有卷积/矩阵计算在
+  fp32，用于 golden/debug（全精度）。
+- **F16 线路（预留）**：`--dtype F16` + `HF_PRECISION=F16`；权重视为
+  fp16（为未来 fp16/bf16 训练 checkpoint 预留），但 ggml 的 1D 卷积/上采样
+  在 CPU 上以 fp32 计算，因此实际语义为 **fp16 权重 + fp32 计算**
+  （bias 恒为 F32）。本实现不启动 fp16 激活计算——ggml conv1d 要求激活
+  为 fp32，未来若上游支持 fp16 激活再升级。
 - **无量化**：GB 由「hifigan 不量化」策略固定（与 VR/RMVPE 不同，那两者
   才会 Q8/Q4 消融）。未来 fp16 训练后仍保持此接口。
 

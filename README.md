@@ -12,7 +12,7 @@ An independent vocoder library for the DiffSinger `diffsinger.cpp` pipeline. Thi
 
 - **Native ggml ops** — `ggml_conv_1d` / `ggml_conv_transpose_1d` / `ggml_mul_mat` (source conv)
 - **Multi-backend** — weights auto-uploaded to backend buffers (CPU/Vulkan/CUDA/Metal); device shaders never read CPU memory
-- **F16/F32 only** — no quantization interface (fp16 training pilot reserved)
+- **F16/F32 dual precision (no quantization)** — F32 line (weights+compute fp32, exact baseline) and F16 line (fp16 weights, reserved for future fp16/bf16 training pilots)
 - **Mel front-ends** — `mel_nvstft` (DiffSinger hifigan front-end) + `MelExtractor` (ecosystem API parity)
 - **CLI + CTest** — single/batch vocode + CTest golden checks (pure numpy reference, no model assets)
 
@@ -28,6 +28,8 @@ cmake --build build -j
 
 # 3. vocode (mel.bin + f0.bin -> out.wav)
 build/bin/hifigan_cli hifigan.gguf mel.bin f0.bin out.wav
+#    fp16 line (needs a --dtype F16 GGUF):
+# HF_PRECISION=F16 build/bin/hifigan_cli hifigan_f16.gguf mel.bin f0.bin out_f16.wav
 ```
 
 ## Ecosystem positioning
@@ -48,13 +50,13 @@ repos never use ggml — these C++ repos exist for edge deployment.
 
 This repo is the **quantization exception** in the ecosystem: the vocoder is
 numerically sensitive, so only two precisions are ever produced
-(`converter/convert_hifigan.py --quant f16|f32`); there is **no** `rec`/Q8
+(`converter/convert_hifigan.py --dtype F32|F16`); there is **no** `rec`/Q8
 tier.
 
 | Asset | Precision | When to use |
 |---|---|---|
-| `hifigan_f16.gguf` | F16 (default) | normal deployments |
-| `hifigan_f32.gguf` | F32 | golden-grade regression baseline |
+| `hifigan_f16.gguf` | F16 (fp16 line) | normal deployments (weights fp16) |
+| `hifigan_f32.gguf` | F32 (exact line) | golden-grade regression baseline |
 
 - Publish via GitHub **Releases**, never commit weights to the repo.
 - Names always carry the precision suffix (`f16` / `f32`) — consumers glob by

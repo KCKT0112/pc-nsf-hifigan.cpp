@@ -28,12 +28,17 @@ struct HifiganModel {
     int hop_size = 0;
     int upp = 0;             // source upsample factor (prod rates[:2]) = 64
     float source_sr = 0.0f;  // 44100 / prod(rates[2:]) = 5512.5
+    ggml_type compute_type = GGML_TYPE_F32;   // engine precision line
     std::vector<int> upsample_rates;
     std::vector<int> upsample_kernels;
     std::vector<int> resblock_kernels;
     std::vector<int> resblock_dilations;
 
-    HifiganModel(const std::string & path, int n_threads);
+    // precision: "F32" (default, weights+compute fp32) or "F16" (reserved for
+    // future fp16/bf16 training pilots).  The F16 line reads weights as fp16
+    // but activations stay fp32 (ggml 1D conv requires fp32 activations on
+    // CPU; bias is always stored F32).  See docs/hifigan.md §5.
+    HifiganModel(const std::string & path, int n_threads, const char * precision = "F32");
     ~HifiganModel();
     HifiganModel(HifiganModel &&) noexcept;
     HifiganModel & operator=(HifiganModel &&) noexcept;
