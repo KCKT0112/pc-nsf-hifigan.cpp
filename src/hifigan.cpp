@@ -3,6 +3,7 @@
 #include <mininsf/mininsf.h>
 
 #include <algorithm>
+#include <chrono>
 #include <cmath>
 #include <cstdio>
 #include <cstring>
@@ -178,6 +179,7 @@ void hifigan_run(const HifiganModel & m, const float * mel, const float * f0, in
                  std::vector<float> & wav) {
     const GGUFModel & gm = *m.gguf;
     const ggml_type ctype = m.compute_type;
+    const auto t_run_start = std::chrono::steady_clock::now();
     if (T <= 0 || !m.mini_nsf) {
         throw std::runtime_error(m.mini_nsf ? "hifigan: frames must be positive"
                                             : "hifigan: non-mini NSF source not implemented");
@@ -259,6 +261,13 @@ void hifigan_run(const HifiganModel & m, const float * mel, const float * f0, in
     ggml_backend_tensor_get(x, tmp.data(), 0, tmp.size() * sizeof(float));
     wav.resize((std::size_t) samples);
     std::copy(tmp.begin(), tmp.begin() + samples, wav.begin());
+
+    if (getenv("PCNSF_TIMING")) {
+        const auto t_end = std::chrono::steady_clock::now();
+        std::fprintf(stderr, "[timing] hifigan_run %.1f ms (T=%d samples=%d)\n",
+                     std::chrono::duration<double, std::milli>(t_end - t_run_start).count(),
+                     T, samples);
+    }
 
     ggml_gallocr_free(alloc);
     ggml_free(ctx);
