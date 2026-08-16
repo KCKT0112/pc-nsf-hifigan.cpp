@@ -45,9 +45,34 @@
 > CLI 支持 `HF_THREADS`（默认 4）控制 CPU 线程；非 CUDA 后端 conv1d 默认走
 > **F32 im2col + mul_mat**（`PCNSF_MANUAL_CONV=1/0` 可覆盖）。
 
-CPU（16 线程）已低于实时（RTF 0.84）；Vulkan 提速至 RTF 0.10、CUDA 0.079。
-相对 torch CUDA 仍慢 ~2.8-30x，下一步可继续压 GPU 的 convT/interleave 与
-CUDA conv1d 的 F32 im2col 侧。
+## vs ONNX/DML 基线（用户指定速度为基准，20s 同一 input_segment.wav）
+
+来自 `J:\0608\backend_matrix_outputs\metrics_*.md` 的 ONNX 参考：
+
+| 引擎 | total_ms | backend_ms | RTF |
+|---|---:|---:|---:|
+| **ONNX + DML（DirectML）** | **339.989** | 338.135 | 0.017（≈59x 实时） |
+| ONNX + CPU | 5186.519 | 5183.049 | 0.259 |
+| torch CUDA（矩阵报告） | 350.584 | 348.053 | 0.018 |
+
+我们的 ggml（同一 20s 输入）相比 ONNX-DML：
+
+| 我们的后端 | 耗时 | vs ONNX-DML |
+|---|---:|---:|
+| CUDA sub-pixel | 1576 ms | **慢 4.6x** |
+| Vulkan sub-pixel | 2010 ms | **慢 5.9x** |
+| CPU sub-pixel（16 线程） | 16818 ms | 慢 49x（vs ONNX-CPU 仍慢 3.2x） |
+
+> 波形级 SNR 对不上（-2.7dB）是因为这些 matrix wav 用了不同的 mel/f0 提取
+> 管线——我们的引擎与我们自己的 torch 参考一致（rms≈4e-5），并非引擎数值错。
+> 速度比较才是同输入的直观结论：**我方 CUDA/Vulkan 仍远落后于 ONNX-DML**，
+> 差距主要在 ggml conv1d/convT 的 GPU kernel 实现与 ONNX-Runtime/DML 的
+> 高度优化内核（cuDNN/DML 卷积）之间的差距。
+
+CPU（16 线程）已低于实时（RTF 0.84）；Vulkan RTF 0.10、CUDA 0.079。但按
+ONNX-DML 基准（340ms/20s）比较，**CUDA 慢 4.6x、Vulkan 慢 5.9x**——下一步应
+瞄准关闭这个 GPU 差距：CUDA/Vulkan 的 conv1d/convT kernel（或整段 CUDA
+graph/F16）对齐 ONNX 的 cuDNN/DML 卷积实现。
 
 ## Vulkan / CUDA 构建状态（本机均通过）
 
