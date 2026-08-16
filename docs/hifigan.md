@@ -98,11 +98,12 @@ golden 由 `tests/gen_golden.py` 在 CTest fixture 内重新生成，无需提�
 
 ## 7. 性能说明
 
-- 每帧 512 样本输出，~1.1s 音频/帧成本由卷积决定（卷积带来的 upsample
-  是 hop 方向的）；单条 CLI 中等曲目规模在 CPU 多线程下实时可承受，
-  Vulkan 后端 <1GB buffer 稳定。
-- 复用 `gguf_get` 缓存 tensor，`hifigan_run` 每次重建 graph（server 无状态
-  API）。
+- **速度基线已定为 ONNX/DirectML**（20s 约 340ms，≈59x 实时）；本 ggml 引擎
+  保留为参考/纯推理实现，不承诺追平 ONNX。实测（RTX 2070，20s，T=1722）：
+  CUDA sub-pixel ~1.58s（RTF 0.079）、Vulkan ~2.0s（RTF 0.10）、CPU 16 线程
+  ~16.8s（RTF 0.84）。与 ONNX-DML 差距见 `verification_real_hifigan.md`。
+- ggml 路径的每帧 512 样本输出成本由卷积决定；`hifigan_run` 每次重建 graph
+  （server 无状态 API）。sub-pixel 已在 CPU/Vulkan 走 F32 im2col+mul_mat。
 
 ## 8. 参考
 

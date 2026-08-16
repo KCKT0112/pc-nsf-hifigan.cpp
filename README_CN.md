@@ -62,6 +62,15 @@ build/bin/hifigan_cli hifigan.gguf mel.bin f0.bin out.wav
   `tests/gen_hifigan_golden.py`）→ 双精度资产附到 release notes。
 - 未来 fp16 *训练*试点先在 torch 侧验证；推理接口保持仅 F16/F32。
 
+## 部署说明（速度基线 = ONNX/DML）
+
+本声码器的**高效部署路径是导出 ONNX 跑 DirectML**（`J:\0608\backend_matrix_outputs\metrics_*.md`：
+一条 20s 约 340ms，≈59x 实时）。本 ggml 引擎作为**参考 / 纯推理实现**维护——
+后端可移植（CPU/Vulkan/CUDA/Metal）、数值与 torch 一致（corr>0.9999），
+但**不是延迟基线**，不应期望它快过 ONNX/DML（差距见
+`docs/verification_real_hifigan.md`）。已定：hifigan 保持在 ONNX 上跑；
+ggml 构建用于正确性/无 GPU/边缘场景与生态整合（被 `hifisampler`/`hachitune` 拉取）。
+
 ## 开发指引
 
 ### 贡献者

@@ -67,6 +67,18 @@ tier.
 - Future fp16 *training* pilots are validated torch-side first; the inference
   interface stays F16/F32 only.
 
+## Deployment note (speed baseline = ONNX/DML)
+
+The **efficient deployment path for this vocoder is the ONNX export running on
+DirectML** (`J:\0608\backend_matrix_outputs\metrics_*.md`: ~340 ms for a 20 s
+clip, about 59× realtime).  This ggml engine is maintained as the **reference /
+pure-inference implementation** — it is backend-portable (CPU/Vulkan/CUDA/Metal)
+and numerically validated against torch (corr > 0.9999), but it is **not** the
+latency baseline and should not be expected to beat ONNX/DML (see
+`docs/verification_real_hifigan.md` for the measured gap).  Decision recorded:
+leave hifigan on ONNX, keep the ggml build for correctness/no-GPU/edge cases
+and ecosystem integration (pulled by `hifisampler`/`hachitune`).
+
 ## Development guide
 
 ### For contributors
