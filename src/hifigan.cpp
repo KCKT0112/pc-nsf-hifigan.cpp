@@ -97,6 +97,30 @@ inline bool use_direct_conv(const GGUFModel & m, ggml_type ctype) {
                             std::strstr(backend_name, "Vulkan") != nullptr);
 }
 
+// The Vulkan conv_direct_1d shader (vulkan-shaders/conv_direct_1d.comp:78-84)
+// requires K >= 3: a BK=32 tap chunk spans floor((BK-1)/K)+1 new input rows,
+// which must fit the XS_ROWS=12 circular x-window; K=2 spans 16 rows > 11 and
+// xs_store() silently overwrites rows the current chunk still reads
+// (deterministic wrong results, K=2 subpixel upsampling convs).  The CPU
+// direct conv has no such restriction (verified bit-exact on the CPU line).
+// Default gate: Vulkan K>=3, other backends K>=1; PCNSF_DIRECT_MIN_K=N
+// overrides both (set 1 to reproduce the old Vulkan K=2 corruption for A/B).
+inline int direct_conv_min_k(const GGUFModel & m) {
+    const char * v = getenv("PCNSF_DIRECT_MIN_K");
+    if (v && *v) return atoi(v);
+    const char * backend_name = ggml_backend_name(m.backend);
+    return (backend_name && std::strstr(backend_name, "Vulkan") != nullptr) ? 3 : 1;
+}
+
+// Sub-3 kernels fall back to the im2col/ggml_conv_1d path (+ explicit
+// bias/leaky/residual nodes, exactly as on non-direct backends).  The caller
+// must treat this like "direct conv unavailable": fuse_io folds pre-scale /
+// pre-leaky / residual only hold when this returns true, so compute it
+// BEFORE deciding any fusion.
+inline bool direct_conv_k_ok(const GGUFModel & m, ggml_type ctype, int64_t kernel) {
+    return use_direct_conv(m, ctype) && kernel >= (int64_t) direct_conv_min_k(m);
+}
+
 // Direct-conv producer-side fusion sites (ggml-audio-patch CONV_DIRECT_1D
 // in_scale/in_slope/res params).  Each site removes a whole elementwise node
 // bit-identically by folding it into the conv's X-pad copy or epilogue:
@@ -139,7 +163,7 @@ ggml_tensor * conv1d_same(ggml_context * ctx, const GGUFModel & m, ggml_type cty
     // F32 im2col+mul_mat is faster than ggml's F16-im2col conv1d on CPU/Vulkan
     // (CPU 21.8->17.7s, Vulkan 18.7->2.56s for a 20s clip); CUDA keeps stock.
     ggml_tensor * y;
-    if (use_direct_conv(m, ctype)) {
+    if (direct_conv_k_ok(m, ctype, w->ne[0])) {
         // direct fused conv: bias (+ optional leaky) in the epilogue;
         // optional residual add and input scale/leaky folded in as well
         const bool fio = use_fuse_io(m, ctype);
@@ -226,13 +250,17 @@ ggml_tensor * upsample_subpixel(ggml_context * ctx, const GGUFModel & m, ggml_ty
     const int L0 = (int) x->ne[0];
 
     // producer-side scale/leaky fusion (cross-level leaky + resblock-mean
-    // scale) folds into the direct conv's X-pad copy
-    const bool fio = use_fuse_io(m, ctype) && (in_scale != 1.0f || in_slope != 0.0f);
+    // scale) folds into the direct conv's X-pad copy; K<3 (subpixel M=2)
+    // fails the Vulkan shader's K>=3 precondition, so the gate applies to
+    // BOTH the folding and the direct-conv branch — on the fallback the
+    // scale/leaky are emitted explicitly here
+    const bool direct = direct_conv_k_ok(m, ctype, w->ne[0]);
+    const bool fio = direct && use_fuse_io(m, ctype) && (in_scale != 1.0f || in_slope != 0.0f);
     if (in_scale != 1.0f && !fio) x = ggml_scale(ctx, x, in_scale);
     if (in_slope != 0.0f && !fio) x = ggml_leaky_relu(ctx, x, in_slope, false);
 
     ggml_tensor * y;
-    if (use_direct_conv(m, ctype)) {
+    if (direct) {
         // direct fused conv: the tiled bias folds into the epilogue
         if (fio) {
             y = ggml_conv_direct_1d_fused(ctx, w, x, gguf_get(m, std::string(pre) + ".bias"),
