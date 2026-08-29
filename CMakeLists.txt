@@ -101,6 +101,9 @@ if(PCNSF_BUILD_CLI)
     add_executable(hifigan_cli tools/hifigan_cli.cpp)
     target_link_libraries(hifigan_cli PRIVATE pc_nsf_hifigan::pc_nsf_hifigan dr_wav)
     target_compile_options(hifigan_cli PRIVATE ${PCNSF_WARN_FLAGS})
+    add_executable(test_conv_direct tools/test_conv_direct.cpp)
+    target_link_libraries(test_conv_direct PRIVATE pc_nsf_hifigan::pc_nsf_hifigan)
+    target_compile_options(test_conv_direct PRIVATE ${PCNSF_WARN_FLAGS})
 endif()
 
 # -----------------------------------------------------------------------------

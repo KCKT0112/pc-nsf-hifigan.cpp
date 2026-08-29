@@ -73,16 +73,28 @@ inline bool fused_site(const GGUFModel & m, char site) {
     return v[0] == '1' || v[0] == 'y' || v[0] == site;
 }
 
+// like fused_site, but the default (env unset) folds: with the direct conv
+// the post-bias leaky rides the conv epilogue for free (CPU and Vulkan),
+// so no separate kernel/op is needed
+inline bool fused_site_conv(const GGUFModel & m, char site) {
+    const char * v = getenv("PCNSF_FUSED_ADD");
+    if (!v || !*v) return true;
+    return v[0] == '1' || v[0] == 'y' || v[0] == site;
+}
+
 // Direct fused conv (ggml-audio-patch CONV_DIRECT_1D): packs the kernel and
-// runs AVX2 output tiles with no im2col buffer; the bias add (and the leaky
-// that follows convs1) fold into the epilogue.  CPU + F32 line only.
+// runs output tiles with no im2col buffer; the bias add (and the leaky
+// that follows convs1) fold into the epilogue.  CPU + Vulkan + F32 line.
+// The Vulkan CONV_DIRECT_1D shader is an F32 implicit GEMM (mul_mm SIMT
+// class) that also folds bias/residual/leaky in the epilogue.
 // PCNSF_DIRECT_CONV=0 falls back to the im2col path for A/B.
 inline bool use_direct_conv(const GGUFModel & m, ggml_type ctype) {
     const char * v = getenv("PCNSF_DIRECT_CONV");
     if (v) return v[0] != '0';
     if (ctype != GGML_TYPE_F32) return false;
     const char * backend_name = ggml_backend_name(m.backend);
-    return backend_name && std::strcmp(backend_name, "CPU") == 0;
+    return backend_name && (std::strcmp(backend_name, "CPU") == 0 ||
+                            std::strstr(backend_name, "Vulkan") != nullptr);
 }
 
 // Direct-conv producer-side fusion sites (ggml-audio-patch CONV_DIRECT_1D
@@ -266,7 +278,10 @@ ggml_tensor * upsample_subpixel(ggml_context * ctx, const GGUFModel & m, ggml_ty
 // (convs1 input and convs2 residual) both see exactly the right values.
 ggml_tensor * resblock(ggml_context * ctx, const GGUFModel & m, ggml_type ctype,
                        ggml_tensor * x, int rb_index) {
-    const bool fuse_c1 = fused_site(m, 'c');
+    // convs1 post-bias leaky: rides the direct-conv epilogue (CPU/Vulkan);
+    // on the im2col fallback the fold needs the CPU ADD_LEAKY_RELU op
+    const bool dc     = use_direct_conv(m, ctype);
+    const bool fuse_c1 = dc ? fused_site_conv(m, 'c') : fused_site(m, 'c');
     const bool fio     = use_fuse_io(m, ctype);
     const bool fio_i   = fio && fuse_io_site(m, 'i');
     const bool fio_r   = fio && fuse_io_site(m, 'r');
@@ -375,7 +390,8 @@ void hifigan_run(const HifiganModel & m, const float * mel, const float * f0, in
     const bool subpixel = gm.tensors.find("hifigan.upsub.0.weight") != gm.tensors.end();
 
     ggml_tensor * x = conv1d_same(ctx, gm, ctype, "hifigan.conv_pre", mel_in, 1,
-                                  fused_site(gm, 'p') ? 0.1f : 0.0f);
+                                  (use_direct_conv(gm, ctype) ? fused_site_conv(gm, 'p')
+                                                              : fused_site(gm, 'p')) ? 0.1f : 0.0f);
     const int num_kernels = (int) m.resblock_kernels.size();
     const float mean_scale = 1.0f / (float) num_kernels;
     const bool fio   = use_fuse_io(gm, ctype);
@@ -387,7 +403,9 @@ void hifigan_run(const HifiganModel & m, const float * mel, const float * f0, in
         // leaky fold into this level's upsub conv X-pad (in_scale/in_slope);
         // on the fallback path (or per-site bisect) they stay explicit nodes.
         // i==0's leaky was already fused into conv_pre's bias add instead.
-        const bool need_leaky = (i > 0 || !fused_site(gm, 'p'));
+        const bool p_folded = use_direct_conv(gm, ctype) ? fused_site_conv(gm, 'p')
+                                                         : fused_site(gm, 'p');
+        const bool need_leaky = (i > 0 || !p_folded);
         const bool need_scale = (i > 0);
         if (need_scale && !fio_s) x = ggml_scale(ctx, x, mean_scale);
         if (need_leaky && !fio_i) x = ggml_leaky_relu(ctx, x, 0.1f, false);
@@ -448,6 +466,7 @@ void hifigan_run(const HifiganModel & m, const float * mel, const float * f0, in
     struct NodeProf {
         std::chrono::steady_clock::time_point t0;
         std::map<std::string, std::pair<int, double>> acc;  // op -> (count, ms)
+        std::vector<char> stage;   // host staging for cross-backend node dumps
         int idx = 0;
     } np;
     auto prof_cb = [](struct ggml_tensor * t, bool ask, void * ud) -> bool {
@@ -460,7 +479,11 @@ void hifigan_run(const HifiganModel & m, const float * mel, const float * f0, in
                 (long long) t->ne[2], ms);
         if (dump_nodes && t->type == GGML_TYPE_F32 && t->ne[0] > 0) {
             const int64_t n = ggml_nelements(t);
-            const float * d = (const float *) t->data;
+            // GPU tensors are not host-readable through t->data; stage the
+            // whole node through the backend's tensor_get path instead.
+            p->stage.resize((size_t) n * sizeof(float));
+            ggml_backend_tensor_get(t, p->stage.data(), 0, (size_t) n * sizeof(float));
+            const float * d = (const float *) p->stage.data();
             double sum = 0, mx = 0;
             for (int64_t i = 0; i < n; i += 997) {
                 const double v = d[i];
@@ -470,6 +493,24 @@ void hifigan_run(const HifiganModel & m, const float * mel, const float * f0, in
             }
             fprintf(stderr, "[dump %4d] %-18s [%6lld] sum=%.6f max=%.6f\n",
                     p->idx - 1, ggml_op_name(t->op), (long long) n, sum, mx);
+            // raw dump: PCNSF_DUMP=<dir> writes node_<idx>_<op>.f32 + manifest
+            if (const char * dir = getenv("PCNSF_DUMP")) {
+                char path[512];
+                snprintf(path, sizeof path, "%s/node_%04d.f32", dir, p->idx - 1);
+                FILE * f = ggml_fopen(path, "wb");
+                if (f) {
+                    fwrite(p->stage.data(), 1, p->stage.size(), f);
+                    fclose(f);
+                    snprintf(path, sizeof path, "%s/manifest.txt", dir);
+                    f = ggml_fopen(path, "a");
+                    if (f) {
+                        fprintf(f, "%d %s %lld %lld %lld\n", p->idx - 1,
+                                ggml_op_name(t->op), (long long) t->ne[0],
+                                (long long) t->ne[1], (long long) t->ne[2]);
+                        fclose(f);
+                    }
+                }
+            }
         }
         auto & e = p->acc[ggml_op_name(t->op)];
         e.first++; e.second += ms;
@@ -478,8 +519,24 @@ void hifigan_run(const HifiganModel & m, const float * mel, const float * f0, in
 
     ggml_backend_sched_t sched = nullptr;
     ggml_gallocr_t alloc = nullptr;
+    ggml_backend_t prof_cpu = nullptr;   // extra CPU backend appended for sched
     if (profile) {
-        sched = ggml_backend_sched_new((ggml_backend_t *) &gm.backend, nullptr, 1,
+        // ggml_backend_sched_new requires the backend list to END with a CPU
+        // backend; when profiling a GPU backend (e.g. Vulkan), append one.
+        // The graph itself still lands on gm.backend: every op in it is
+        // supported there, so the CPU entry only satisfies the API contract.
+        std::vector<ggml_backend_t> prof_backends;
+        prof_backends.push_back(gm.backend);
+        ggml_backend_dev_t dev = ggml_backend_get_device(gm.backend);
+        if (!dev || ggml_backend_dev_type(dev) != GGML_BACKEND_DEVICE_TYPE_CPU) {
+            ggml_backend_dev_t cpu_dev = ggml_backend_dev_by_type(GGML_BACKEND_DEVICE_TYPE_CPU);
+            if (cpu_dev) {
+                prof_cpu = ggml_backend_dev_init(cpu_dev, nullptr);
+                prof_backends.push_back(prof_cpu);
+            }
+        }
+        sched = ggml_backend_sched_new(prof_backends.data(), nullptr,
+                                       (int) prof_backends.size(),
                                        GGML_DEFAULT_GRAPH_SIZE, false, false);
         if (!sched) throw std::runtime_error("hifigan: sched init failed");
         ggml_backend_sched_set_eval_callback(sched, prof_cb, &np);
@@ -516,6 +573,7 @@ void hifigan_run(const HifiganModel & m, const float * mel, const float * f0, in
         }
         fprintf(stderr, "[prof] node total %.1f ms\n", total_ms);
         ggml_backend_sched_free(sched);
+        if (prof_cpu) ggml_backend_free(prof_cpu);
     }
 
     const int samples = (int) x->ne[0];

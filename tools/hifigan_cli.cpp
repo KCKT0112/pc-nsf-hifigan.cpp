@@ -104,6 +104,18 @@ static int run_batch(const char * gguf, const char * list, const char * outdir,
 }
 
 int main(int argc, char ** argv) {
+    // Vulkan fp32 contract: coopmat2 devices silently convert F32 mul_mat
+    // operands to F16 (fp16-class error, ~1e-2 on this vocoder).  The F32
+    // SIMT path is also faster for this graph (543ms vs 857ms on RTX 2070).
+    // Must run before any ggml backend initializes.  An explicit value in
+    // the environment still wins.
+    if (!getenv("GGML_VK_DISABLE_COOPMAT2")) {
+#if defined(_WIN32)
+        _putenv_s("GGML_VK_DISABLE_COOPMAT2", "1");
+#else
+        setenv("GGML_VK_DISABLE_COOPMAT2", "1", 1);
+#endif
+    }
     if (argc < 2) {
         std::fprintf(stderr,
             "usage: hifigan_cli <gguf> <mel.bin> <f0.bin> <out.wav>\n"
