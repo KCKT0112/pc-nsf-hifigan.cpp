@@ -8,6 +8,7 @@
 #include <cstdlib>
 #include <cstring>
 #include <cmath>
+#include <chrono>
 #include <vector>
 #include <string>
 
@@ -718,6 +719,24 @@ int main(int argc, char ** argv) {
             if (sscanf(p, "%d,%d,%f,%f,%f", &bi, &re, &sl, &isc, &isl) == 5) {
                 c.bias=bi; c.res=re; c.slope=sl; c.in_scale=isc; c.in_slope=isl;
             }
+        }
+        // bench mode: PCNSF_BENCH=N → time N iterations (hw clock) after warmup,
+        // using the variant forced by GGML_VK_CONV_DIRECT_VARIANT (or default pick)
+        const int n_bench = getenv("PCNSF_BENCH") ? atoi(getenv("PCNSF_BENCH")) : 0;
+        if (n_bench > 0) {
+            run_case(c, backends[0], bk_name, true);                 // warmup / JIT
+            double best = 1e300, worst = 0.0, sum = 0.0;
+            for (int it = 0; it < n_bench; it++) {
+                const auto t0 = std::chrono::steady_clock::now();
+                run_case(c, backends[0], bk_name, true);             // compute-only (check_only skips fp64 ref)
+                const double ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count();
+                best = ms < best ? ms : best;  worst = ms > worst ? ms : worst;  sum += ms;
+            }
+            const char * vf = getenv("GGML_VK_CONV_DIRECT_VARIANT");
+            printf("[bench] variant=%s K=%d IC=%d OC=%d T=%d dil=%d  n=%d  mean=%.3f ms  min=%.3f  max=%.3f\n",
+                   vf ? vf : "def", c.K, c.IC, c.OC, c.T, c.dil, n_bench, sum / n_bench, best, worst);
+            ggml_backend_free(backends[0]);
+            return 0;
         }
         run_case(c, backends[0], bk_name, true);    // warmup
         const bool ok = run_case(c, backends[0], bk_name, false);
