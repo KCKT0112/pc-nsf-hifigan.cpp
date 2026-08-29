@@ -634,6 +634,9 @@ static bool run_repro(ggml_backend_t bk, const char * bk_name) {
 }
 
 int main(int argc, char ** argv) {
+    // unbuffer stdout: ggml-vk teardown can crash the process on exit
+    // (known 0xC0000005) and full buffering would swallow the case table
+    setvbuf(stdout, nullptr, _IONBF, 0);
     ggml_time_init();
     const char * want = argc > 1 ? argv[1] : "vulkan";
 
