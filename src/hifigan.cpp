@@ -73,6 +73,37 @@ inline bool fused_site(const GGUFModel & m, char site) {
     return v[0] == '1' || v[0] == 'y' || v[0] == site;
 }
 
+// Direct fused conv (ggml-audio-patch CONV_DIRECT_1D): packs the kernel and
+// runs AVX2 output tiles with no im2col buffer; the bias add (and the leaky
+// that follows convs1) fold into the epilogue.  CPU + F32 line only.
+// PCNSF_DIRECT_CONV=0 falls back to the im2col path for A/B.
+inline bool use_direct_conv(const GGUFModel & m, ggml_type ctype) {
+    const char * v = getenv("PCNSF_DIRECT_CONV");
+    if (v) return v[0] != '0';
+    if (ctype != GGML_TYPE_F32) return false;
+    const char * backend_name = ggml_backend_name(m.backend);
+    return backend_name && std::strcmp(backend_name, "CPU") == 0;
+}
+
+// Direct-conv producer-side fusion sites (ggml-audio-patch CONV_DIRECT_1D
+// in_scale/in_slope/res params).  Each site removes a whole elementwise node
+// bit-identically by folding it into the conv's X-pad copy or epilogue:
+//   i: input leaky (resblock leaky-A and the cross-level leaky after scale)
+//   s: input scale (the 1/num_kernels resblock-mean scale)
+//   r: residual add (convs2 epilogue adds the running h)
+// PCNSF_FUSE_IO=0 disables all; i/s/r select single sites for bisect.
+inline bool use_fuse_io(const GGUFModel & m, ggml_type ctype) {
+    const char * v = getenv("PCNSF_FUSE_IO");
+    if (v) return v[0] != '0';
+    return use_direct_conv(m, ctype);   // CPU direct-conv line only
+}
+
+inline bool fuse_io_site(const GGUFModel & m, char site) {
+    const char * v = getenv("PCNSF_FUSE_IO");
+    if (!v || !*v) return true;   // checked by the caller via use_fuse_io
+    return v[0] == '1' || v[0] == 'y' || v[0] == site;
+}
+
 // Conv1d "same" (pad = (K/2)*dilation, matching torch get_padding for odd K),
 // kernel layout [K, IC, OC], data layout [T, IC] -> [T', OC].
 // `ctype` selects the storage precision of the kernel: GGML_TYPE_F32 (exact
@@ -83,14 +114,34 @@ inline bool fused_site(const GGUFModel & m, char site) {
 // When `leaky_slope` is nonzero (and the backend has the fused op), the bias
 // add and the following leaky ReLU collapse into one ADD_LEAKY_RELU pass —
 // the caller then MUST NOT emit its own ggml_leaky_relu on the result.
+// `res` (residual), `in_scale` and `in_slope` (producer-side fusions) only
+// apply on the direct-conv path; on fallbacks the caller must have emitted
+// the equivalent explicit nodes (pass res=nullptr, in_scale=1, in_slope=0).
 ggml_tensor * conv1d_same(ggml_context * ctx, const GGUFModel & m, ggml_type ctype,
                           const std::string & prefix, ggml_tensor * x, int dilation = 1,
-                          float leaky_slope = 0.0f) {    ggml_tensor * w = gguf_get(m, prefix + ".weight");
+                          float leaky_slope = 0.0f, ggml_tensor * res = nullptr,
+                          float in_scale = 1.0f, float in_slope = 0.0f) {
+    ggml_tensor * w = gguf_get(m, prefix + ".weight");
     if (w->type != ctype) w = ggml_cast(ctx, w, ctype);
     const int pad = (int) (w->ne[0] / 2) * dilation;
     // F32 im2col+mul_mat is faster than ggml's F16-im2col conv1d on CPU/Vulkan
     // (CPU 21.8->17.7s, Vulkan 18.7->2.56s for a 20s clip); CUDA keeps stock.
     ggml_tensor * y;
+    if (use_direct_conv(m, ctype)) {
+        // direct fused conv: bias (+ optional leaky) in the epilogue;
+        // optional residual add and input scale/leaky folded in as well
+        const bool fio = use_fuse_io(m, ctype);
+        ggml_tensor * rres = (res && fio) ? res : nullptr;
+        const float fsc = (in_scale != 1.0f && fio) ? in_scale : 1.0f;
+        const float fsl = (in_slope != 0.0f && fio) ? in_slope : 0.0f;
+        if (rres || fsc != 1.0f || fsl != 0.0f) {
+            return ggml_conv_direct_1d_fused(ctx, w, x,
+                                             gguf_get(m, prefix + ".bias"), rres,
+                                             pad, dilation, leaky_slope, fsc, fsl);
+        }
+        return ggml_conv_direct_1d(ctx, w, x, gguf_get(m, prefix + ".bias"),
+                                   pad, dilation, leaky_slope);
+    }
     if (use_manual_conv(m)) {
         y = conv1d_f32(ctx, w, x, pad, dilation);
     } else {
@@ -99,9 +150,12 @@ ggml_tensor * conv1d_same(ggml_context * ctx, const GGUFModel & m, ggml_type cty
     }
     ggml_tensor * b = ggml_reshape_2d(ctx, gguf_get(m, prefix + ".bias"), 1, y->ne[1]);
     if (leaky_slope != 0.0f && use_fused_add_leaky(m)) {
-        return ggml_add_leaky_relu(ctx, y, b, leaky_slope);
+        y = ggml_add_leaky_relu(ctx, y, b, leaky_slope);
+    } else {
+        y = ggml_add(ctx, y, b);
     }
-    return ggml_add(ctx, y, b);
+    if (res) y = ggml_add(ctx, y, res);
+    return y;
 }
 
 // Conv1d 1x1 via mul_mat (source_conv): kernel [1, IC, OC] -> [OC, T].
@@ -147,7 +201,8 @@ ggml_tensor * conv_transpose1d_crop(ggml_context * ctx, const GGUFModel & m,
 // This matches torch ConvTranspose1d bit-for-bit (fp32), and works on every
 // backend that supports ggml_conv_1d / cont (CPU/CUDA/Vulkan/Metal).
 ggml_tensor * upsample_subpixel(ggml_context * ctx, const GGUFModel & m, ggml_type ctype,
-                                int idx, ggml_tensor * x, int stride, int kernel) {
+                                int idx, ggml_tensor * x, int stride, int kernel,
+                                float in_scale = 1.0f, float in_slope = 0.0f) {
     char pre[64];
     std::snprintf(pre, sizeof pre, "hifigan.upsub.%d", idx);
     ggml_tensor * w = gguf_get(m, std::string(pre) + ".weight");
@@ -158,11 +213,29 @@ ggml_tensor * upsample_subpixel(ggml_context * ctx, const GGUFModel & m, ggml_ty
     const int Cout = CS / stride;
     const int L0 = (int) x->ne[0];
 
-    ggml_tensor * y = use_manual_conv(m) ? conv1d_f32(ctx, w, x, M - 1, 1)
-                                         : ggml_conv_1d(ctx, w, x, 1, M - 1, 1);
+    // producer-side scale/leaky fusion (cross-level leaky + resblock-mean
+    // scale) folds into the direct conv's X-pad copy
+    const bool fio = use_fuse_io(m, ctype) && (in_scale != 1.0f || in_slope != 0.0f);
+    if (in_scale != 1.0f && !fio) x = ggml_scale(ctx, x, in_scale);
+    if (in_slope != 0.0f && !fio) x = ggml_leaky_relu(ctx, x, in_slope, false);
+
+    ggml_tensor * y;
+    if (use_direct_conv(m, ctype)) {
+        // direct fused conv: the tiled bias folds into the epilogue
+        if (fio) {
+            y = ggml_conv_direct_1d_fused(ctx, w, x, gguf_get(m, std::string(pre) + ".bias"),
+                                          nullptr, M - 1, 1, 0.0f, in_scale, in_slope);
+        } else {
+            y = ggml_conv_direct_1d(ctx, w, x, gguf_get(m, std::string(pre) + ".bias"),
+                                    M - 1, 1, 0.0f);
+        }
+    } else {
+        y = use_manual_conv(m) ? conv1d_f32(ctx, w, x, M - 1, 1)
+                               : ggml_conv_1d(ctx, w, x, 1, M - 1, 1);
+        ggml_tensor * b = ggml_reshape_2d(ctx, gguf_get(m, std::string(pre) + ".bias"), 1, CS);
+        y = ggml_add(ctx, y, b);
+    }
     y = ggml_reshape_2d(ctx, y, y->ne[0], y->ne[1]);
-    ggml_tensor * b = ggml_reshape_2d(ctx, gguf_get(m, std::string(pre) + ".bias"), 1, CS);
-    y = ggml_add(ctx, y, b);
     const int Lt = (int) y->ne[0];
 
     // phase interleave: out[(t*s+r), o] = z[t, r*Cout + o]   (phase-major)
@@ -186,23 +259,34 @@ ggml_tensor * upsample_subpixel(ggml_context * ctx, const GGUFModel & m, ggml_ty
 // ResBlock1: for each of 3 (k, d) pairs: lrelu -> conv(d) -> lrelu -> conv(1) -> add.
 // convs1 dilations [1,3,5]; convs2 always dilation 1.
 // On CPU the convs1 bias add fuses with the leaky that follows it (bit-identical).
-// The residual add is NOT fused with the next sub-block's leaky: the residual
-// sum itself stays the residual operand of the NEXT sub-block (unactivated),
-// so it has two consumers and the fused (leaky'd) tensor cannot replace it.
+// With fuse_io (CPU direct conv): the leaky on h folds into convs1's X-pad
+// (in_slope), and the residual add folds into convs2's epilogue (res=h) — the
+// convs2 output IS the new h.  h itself stays un-activated for the residual
+// chain; each conv reads its own padded copy, so the two consumers of h
+// (convs1 input and convs2 residual) both see exactly the right values.
 ggml_tensor * resblock(ggml_context * ctx, const GGUFModel & m, ggml_type ctype,
                        ggml_tensor * x, int rb_index) {
     const bool fuse_c1 = fused_site(m, 'c');
+    const bool fio     = use_fuse_io(m, ctype);
+    const bool fio_i   = fio && fuse_io_site(m, 'i');
+    const bool fio_r   = fio && fuse_io_site(m, 'r');
     ggml_tensor * h = x;
     for (int k = 0; k < 3; ++k) {
         const int dil = k == 0 ? 1 : (k == 1 ? 3 : 5);
         char pre[96];
         std::snprintf(pre, sizeof pre, "hifigan.resblocks.%d.convs1.%d", rb_index, k);
-        ggml_tensor * xt = ggml_leaky_relu(ctx, h, 0.1f, false);
-        xt = conv1d_same(ctx, m, ctype, pre, xt, dil, fuse_c1 ? 0.1f : 0.0f);
+        ggml_tensor * xt = fio_i ? h : ggml_leaky_relu(ctx, h, 0.1f, false);
+        xt = conv1d_same(ctx, m, ctype, pre, xt, dil, fuse_c1 ? 0.1f : 0.0f,
+                         nullptr, 1.0f, fio_i ? 0.1f : 0.0f);
         if (!fuse_c1) xt = ggml_leaky_relu(ctx, xt, 0.1f, false);
         std::snprintf(pre, sizeof pre, "hifigan.resblocks.%d.convs2.%d", rb_index, k);
-        xt = conv1d_same(ctx, m, ctype, pre, xt, 1);
-        h = ggml_add(ctx, xt, h);
+        if (fio_r) {
+            // residual folded into the convs2 epilogue: out = conv + bias + h
+            h = conv1d_same(ctx, m, ctype, pre, xt, 1, 0.0f, h);
+        } else {
+            xt = conv1d_same(ctx, m, ctype, pre, xt, 1);
+            h = ggml_add(ctx, xt, h);
+        }
     }
     return h;
 }
@@ -293,16 +377,35 @@ void hifigan_run(const HifiganModel & m, const float * mel, const float * f0, in
     ggml_tensor * x = conv1d_same(ctx, gm, ctype, "hifigan.conv_pre", mel_in, 1,
                                   fused_site(gm, 'p') ? 0.1f : 0.0f);
     const int num_kernels = (int) m.resblock_kernels.size();
+    const float mean_scale = 1.0f / (float) num_kernels;
+    const bool fio   = use_fuse_io(gm, ctype);
+    const bool fio_s = fio && fuse_io_site(gm, 's');
+    const bool fio_i = fio && fuse_io_site(gm, 'i');
     for (int i = 0; i < m.num_upsamples; ++i) {
-        // i==0's leaky was fused into conv_pre's bias add; every later level
-        // leaky-izes the previous level's resblock mean instead
-        if (i > 0 || !fused_site(gm, 'p')) x = ggml_leaky_relu(ctx, x, 0.1f, false);
+        // Entering level i>0, x is the previous level's resblock mean
+        // (scale(sum, 1/nk) then leaky).  With fuse_io both the scale and the
+        // leaky fold into this level's upsub conv X-pad (in_scale/in_slope);
+        // on the fallback path (or per-site bisect) they stay explicit nodes.
+        // i==0's leaky was already fused into conv_pre's bias add instead.
+        const bool need_leaky = (i > 0 || !fused_site(gm, 'p'));
+        const bool need_scale = (i > 0);
+        if (need_scale && !fio_s) x = ggml_scale(ctx, x, mean_scale);
+        if (need_leaky && !fio_i) x = ggml_leaky_relu(ctx, x, 0.1f, false);
         char pre[64];
         std::snprintf(pre, sizeof pre, "hifigan.ups.%d", i);
         const int s = m.upsample_rates[i];
         const int K = m.upsample_kernels[i];
-        x = subpixel ? upsample_subpixel(ctx, gm, ctype, i, x, s, K)
-                     : conv_transpose1d_crop(ctx, gm, ctype, pre, x, s, K);
+        const float up_sc = (need_scale && fio_s) ? mean_scale : 1.0f;
+        const float up_sl = (need_leaky && fio_i) ? 0.1f : 0.0f;
+        if (up_sc != 1.0f || up_sl != 0.0f) {
+            x = subpixel ? upsample_subpixel(ctx, gm, ctype, i, x, s, K, up_sc, up_sl)
+                         : (x = ggml_scale(ctx, x, up_sc),
+                            x = ggml_leaky_relu(ctx, x, up_sl, false),
+                            conv_transpose1d_crop(ctx, gm, ctype, pre, x, s, K));
+        } else {
+            x = subpixel ? upsample_subpixel(ctx, gm, ctype, i, x, s, K)
+                         : conv_transpose1d_crop(ctx, gm, ctype, pre, x, s, K);
+        }
         if (i == 1) {
             ggml_tensor * xs = conv1d_k1(ctx, gm, ctype, "hifigan.source_conv", src_in);
             x = ggml_add(ctx, x, xs);
@@ -312,12 +415,22 @@ void hifigan_run(const HifiganModel & m, const float * mel, const float * f0, in
             ggml_tensor * rb = resblock(ctx, gm, ctype, x, i * num_kernels + j);
             sum = sum ? ggml_add(ctx, sum, rb) : rb;
         }
-        x = ggml_scale(ctx, sum, 1.0f / (float) num_kernels);
+        // the mean scale is deferred: on the fused path it folds into the
+        // next level's upsub (or conv_post) X-pad; otherwise it is applied
+        // explicitly at the top of the next iteration
+        x = sum;
     }
     // NOTE: torch Generator.forward ends with F.leaky_relu(x) whose DEFAULT
-    // negative_slope is 0.01 (not 0.1).  We match torch here.
-    x = ggml_leaky_relu(ctx, x, 0.01f, false);
-    x = conv1d_same(ctx, gm, ctype, "hifigan.conv_post", x, 1);
+    // negative_slope is 0.01 (not 0.1).  We match torch here.  With fuse_io
+    // the final mean-scale + this leaky fold into conv_post's X-pad.
+    if (!fio_s) x = ggml_scale(ctx, x, mean_scale);
+    if (fio_i) {
+        x = conv1d_same(ctx, gm, ctype, "hifigan.conv_post", x, 1, 0.0f,
+                        nullptr, fio_s ? mean_scale : 1.0f, 0.01f);
+    } else {
+        x = ggml_leaky_relu(ctx, x, 0.01f, false);
+        x = conv1d_same(ctx, gm, ctype, "hifigan.conv_post", x, 1);
+    }
     x = ggml_tanh(ctx, x);
     ggml_set_output(x);
 
