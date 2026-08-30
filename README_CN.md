@@ -102,4 +102,4 @@ third_party/             pocketfft_hdronly.h（vendored 单头文件）
 cmake/Dependencies.cmake 依赖管理（FetchContent）
 ```
 
-[构建](BUILDING.md) · [架构](docs/hifigan.md) · [测试](tests/README.md)
+[构建](BUILDING.md) · [架构](docs/hifigan.md) · [基准实测](docs/benchmarks.md) · [测试](tests/README.md)

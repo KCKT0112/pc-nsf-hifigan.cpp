@@ -110,4 +110,4 @@ third_party/             pocketfft_hdronly.h (vendored single header)
 cmake/Dependencies.cmake dependency management (FetchContent)
 ```
 
-[Building](BUILDING.md) · [Architecture](docs/hifigan.md) · [Tests](tests/README.md)
+[Building](BUILDING.md) · [Architecture](docs/hifigan.md) · [Benchmarks](docs/benchmarks.md) · [Tests](tests/README.md)
