@@ -15,8 +15,8 @@
 |---|---:|---|
 | ggml CPU，原生 conv 路径（`PCNSF_DIRECT_CONV=0`） | 80 002 ms | `build-cpu` 姿态，见 §3 |
 | ggml CPU，直接卷积、无生产侧融合（`PCNSF_FUSE_IO=0`） | 31 772 ms | 同上 |
-| **ggml CPU，直接卷积 + 生产侧融合（默认）** | **28 030 ms** | 同上，2.85× 对原生 ggml |
-| ggml CPU 同上、`HF_THREADS=4` | 79 982 ms | 线程从 4 → 24（6×）只换 2.9×，扩展性偏弱 |
+| **ggml CPU，直接卷积 + 生产侧融合（默认）** | **23 651 ms**（中位，`HF_THREADS=24`） | 同上；旧窗 28 030 ms 的勘误见 §1.1 |
+| ggml CPU 同上、`HF_THREADS` 扫描 | 见 §1.1 | T1→T24 全矩阵（本次会话重测）；线程数自 `wip/cpu-threads-default` 起默认 16 |
 | **ggml Vulkan（补丁四，全卷积过 `supports_op`）** | **433.2–435.0 ms** | `build-vk` 姿态，见 §3；历史上限值 |
 | ggml Vulkan，同二进制清理调试钩子后复测 | 458.4–478.8 ms | 输出与清理前逐位一致（MD5 同）、SPIR-V 未变；记入偶发整机负载噪声，本文采用 **≈430–480 ms** 区间话术 |
 | ggml Vulkan，全部卷积强制回落 CPU（`PCNSF_DIRECT_MIN_K` 实验姿态） | 571–581 ms | 精度 0.99999956，验证回落路径正确 |
@@ -24,6 +24,21 @@
 | ONNX Runtime DML EP（fp32） | 325.8 ms | 同上 |
 
 诚实陈述：CPU 侧相对原生 ggml 提速 2.85×，但仍落后 ORT CPU EP 约 5.4×；ORT 的线程化 GEMM 在该 Haswell 级 CPU 上调校得更好。差距定位于 level-0 `[881664, 256]` 级大激活的分块与并行划分，是后续工作。**勘误**：本文档/上游补丁文档旧版曾引用 10 038 / 5 973 / 4 764 ms 并称与 ORT CPU 持平——该记录对应一次陈旧/错误构建配置，不可复现；上表取而代之（同机同模型重测）。
+
+### 1.1 CPU 线程扩展矩阵（同 binary 交错 A/B 重测，2026-08-30）
+
+绑定：consumer `f8c16ba`；`build-cpu\bin\hifigan_cli.exe`（2026-08-29 22:58:57 构建，Release/AVX2/MSVC 14.29）；命令姿态 `HF_THREADS=<N>` + `PCNSF_TIMING=1`，每档 ≥3 跑取中位。
+
+| HF_THREADS | 中位 (ms) | 相对 T1 | 效率 |
+|---:|---:|---:|---:|
+| 1 | 291 938 | 1.00× | 1.00 |
+| 4 | 75 800 | 3.85× | 0.96 |
+| 8 | 42 131 | 6.93× | 0.87 |
+| 12 | 32 096 | 9.09× | 0.76 |
+| 16 | 28 113 | 10.39× | 0.65 |
+| 24 | 23 651（n=4：22 701.8 / 23 079.7 / 24 221.7 / 25 368.0） | 12.34× | 0.51 |
+
+判读：12 线程附近进入访存墙；16 → 24 只再换 +19%（SMT 兄弟收益）。**自 `wip/cpu-threads-default` 起 `HF_THREADS` 默认 4 → 16**：默认姿态端到端从 ≈80 s 档直接进入 ≈28 s 档；低核数机器的超额线程订阅对本访存型负载基本无害。**勘误（§1 首表）**：旧行“28 030 ms（T24）”来自更早带调试钩子的窗口；同 binary 干净复测中位 23 651 ms（上表档内），原值按噪声上限保留记录、不再作为基准引用。
 
 ## 2. 精度（对 torch CPU golden，`cmp_align.py` offset 对齐）
 
@@ -63,7 +78,7 @@ git apply patches/vulkan-conv-direct-1d-ggml0190.patch  # 补丁四
 运行（示意为 Windows cmd 风格；资产 `hifigan_f32.gguf` / `mel.bin` / `f0.bin` / `golden_f32.bin` / `cmp_align.py` 体积原因不入库）：
 
 ```bat
-:: CPU 计时（线程数由 HF_THREADS 控制，默认 4）
+:: CPU 计时（线程数由 HF_THREADS 控制，默认 16）
 set HF_THREADS=24
 set PCNSF_TIMING=1
 build-cpu\bin\hifigan_cli.exe hifigan_f32.gguf mel.bin f0.bin cpu.wav

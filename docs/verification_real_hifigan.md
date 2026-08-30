@@ -42,7 +42,7 @@
 | **ggml CUDA F32 sub-pixel（RTX 2070）** | **1576 ms** | **0.079（≈12.7x 实时）** | CUDA 保持 stock conv1d |
 | torch CUDA（同参数参考） | 557 ms | 0.028（36x 实时） | CUDA 正常加速 |
 
-> CLI 支持 `HF_THREADS`（默认 4）控制 CPU 线程；非 CUDA 后端 conv1d 默认走
+> CLI 支持 `HF_THREADS`（默认 16）控制 CPU 线程；非 CUDA 后端 conv1d 默认走
 > **F32 im2col + mul_mat**（`PCNSF_MANUAL_CONV=1/0` 可覆盖）。
 
 ## vs ONNX/DML 基线（用户指定速度为基准，20s 同一 input_segment.wav）

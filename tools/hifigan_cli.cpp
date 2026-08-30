@@ -47,7 +47,7 @@ static bool write_wav(const std::string & path, const float * data, size_t n,
     return written == n;
 }
 
-static int hf_threads() { const char * s = getenv("HF_THREADS"); int n = s ? std::atoi(s) : 4; return n > 0 ? n : 4; }
+static int hf_threads() { const char * s = getenv("HF_THREADS"); int n = s ? std::atoi(s) : 16; return n > 0 ? n : 16; }
 
 static int vocode(const char * gguf, const char * melp, const char * f0p, const char * outp) {
     const char * prec = getenv("HF_PRECISION");
