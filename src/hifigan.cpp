@@ -84,19 +84,27 @@ inline bool fused_site_conv(const GGUFModel & m, char site) {
 
 // Direct fused conv (ggml-audio-patch CONV_DIRECT_1D): packs the kernel and
 // runs output tiles with no im2col buffer; the bias add (and the leaky
-// that follows convs1) fold into the epilogue.  AVX2 CPU + Vulkan + F32 line.
+// that follows convs1) fold into the epilogue.  AVX2 CPU + Vulkan/Metal + F32 line.
 // The CPU kernel's non-AVX2 implementation is a correctness-only scalar
 // fallback, so ARM64 defaults to im2col + mul_mat instead.
-// The Vulkan CONV_DIRECT_1D shader is an F32 implicit GEMM (mul_mm SIMT
-// class) that also folds bias/residual/leaky in the epilogue.
+// The Vulkan and Metal CONV_DIRECT_1D shaders are F32 implicit GEMMs that also
+// fold bias/residual/leaky/input-scale into the same device pass.  Metal uses
+// simdgroup matrices and never materializes the very large im2col tensors.
 // PCNSF_DIRECT_CONV=0 falls back to the im2col path for A/B.
+inline bool is_metal_backend(const GGUFModel & m) {
+    const char * backend_name = ggml_backend_name(m.backend);
+    if (!backend_name) return false;
+    return std::strstr(backend_name, "Metal") != nullptr ||
+           std::strncmp(backend_name, "MTL", 3) == 0;
+}
+
 inline bool use_direct_conv(const GGUFModel & m, ggml_type ctype) {
     const char * v = getenv("PCNSF_DIRECT_CONV");
     if (v) return v[0] != '0';
     if (ctype != GGML_TYPE_F32) return false;
     const char * backend_name = ggml_backend_name(m.backend);
     if (!backend_name) return false;
-    if (std::strstr(backend_name, "Vulkan") != nullptr) return true;
+    if (std::strstr(backend_name, "Vulkan") != nullptr || is_metal_backend(m)) return true;
     return std::strcmp(backend_name, "CPU") == 0 && ggml_cpu_has_avx2();
 }
 
@@ -569,10 +577,16 @@ void hifigan_run(const HifiganModel & m, const float * mel, const float * f0, in
         sched = ggml_backend_sched_new(prof_backends.data(), nullptr,
                                        (int) prof_backends.size(),
                                        GGML_DEFAULT_GRAPH_SIZE, false, false);
-        if (!sched) throw std::runtime_error("hifigan: sched init failed");
+        if (!sched) {
+            if (prof_cpu) ggml_backend_free(prof_cpu);
+            ggml_free(ctx);
+            throw std::runtime_error("hifigan: sched init failed");
+        }
         ggml_backend_sched_set_eval_callback(sched, prof_cb, &np);
         if (!ggml_backend_sched_alloc_graph(sched, gf)) {
             ggml_backend_sched_free(sched);
+            if (prof_cpu) ggml_backend_free(prof_cpu);
+            ggml_free(ctx);
             throw std::runtime_error("hifigan: sched alloc failed");
         }
     } else {
@@ -590,6 +604,7 @@ void hifigan_run(const HifiganModel & m, const float * mel, const float * f0, in
     if (st != GGML_STATUS_SUCCESS) {
         if (alloc) ggml_gallocr_free(alloc);
         if (sched) ggml_backend_sched_free(sched);
+        if (prof_cpu) ggml_backend_free(prof_cpu);
         ggml_free(ctx);
         throw std::runtime_error("hifigan: graph compute failed");
     }
@@ -603,8 +618,6 @@ void hifigan_run(const HifiganModel & m, const float * mel, const float * f0, in
             total_ms += kv.second.second;
         }
         fprintf(stderr, "[prof] node total %.1f ms\n", total_ms);
-        ggml_backend_sched_free(sched);
-        if (prof_cpu) ggml_backend_free(prof_cpu);
     }
 
     const int samples = (int) x->ne[0];
@@ -612,6 +625,11 @@ void hifigan_run(const HifiganModel & m, const float * mel, const float * f0, in
     ggml_backend_tensor_get(x, tmp.data(), 0, tmp.size() * sizeof(float));
     wav.resize((std::size_t) samples);
     std::copy(tmp.begin(), tmp.begin() + samples, wav.begin());
+
+    // The scheduler owns x's allocation in profile mode, so keep it alive
+    // through the device-to-host copy above.
+    if (sched) ggml_backend_sched_free(sched);
+    if (prof_cpu) ggml_backend_free(prof_cpu);
 
     if (getenv("PCNSF_TIMING")) {
         const auto t_end = std::chrono::steady_clock::now();

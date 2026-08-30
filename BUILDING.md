@@ -13,7 +13,8 @@ All dependencies are fetched by CMake (FetchContent); no manual third-party inst
 
 > Patch policy: this repository does not maintain a ggml fork. The pinned stock
 > ggml source is patched during FetchContent from the snapshots in `patches/`;
-> this supplies the learned audio ops and their CPU/Vulkan/Metal integration.
+> this supplies the learned audio ops and their CPU/Vulkan/Metal integration,
+> including the Metal implicit-GEMM direct-convolution kernel.
 
 ## Steps
 

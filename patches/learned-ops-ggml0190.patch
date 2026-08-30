@@ -20,7 +20,7 @@ index 5cb49d0..818347a 100644
 +        // Fused stride-1 direct 1D convolution (HiFiGAN vocoder): packs the
 +        // kernel to [IC*K, OC] once per call and runs AVX2-blocked output
 +        // tiles without materializing an im2col buffer; optional bias add +
-+        // leaky ReLU in the epilogue.  CPU only.
++        // leaky ReLU in the epilogue.  Implemented on CPU, Vulkan and Metal.
 +        GGML_OP_CONV_DIRECT_1D,
 +
          GGML_OP_COUNT,
@@ -149,7 +149,7 @@ index 5cb49d0..818347a 100644
 +    //   x:    [T, IC] contiguous F32
 +    //   bias: [OC] F32 or NULL
 +    //   out:  [OL, OC] with OL = T + 2*pad - dil*(K-1)
-+    // CPU only; other backends never emit the op.
++    // CPU/Vulkan/Metal; unsupported backends use the existing im2col graph.
 +    GGML_API struct ggml_tensor * ggml_conv_direct_1d(
 +            struct ggml_context * ctx,
 +            struct ggml_tensor  * w,      // [K, IC, OC]
@@ -159,7 +159,7 @@ index 5cb49d0..818347a 100644
 +            int                   dil,
 +            float                 leaky_slope);   // 0 = no activation
 +
-+    // fused variant with two extra producer-side fusions (CPU only):
++    // fused variant with two extra producer-side fusions (CPU/Vulkan/Metal):
 +    //   res:       [OL, OC] contiguous or NULL; when set the epilogue adds it
 +    //              (out = (bias + acc) + res, the same association as
 +    //              ggml_add(conv_out, res)) replacing a separate ADD node.

@@ -11,7 +11,7 @@ An independent vocoder library for the DiffSinger `diffsinger.cpp` pipeline. Thi
 ## Feature highlights
 
 - **Native ggml ops** — sub-pixel upsample (phase-major, exact) via F32 `im2col + mul_mat` + graph interleave (default); `ggml_conv_transpose_1d` kept as legacy fallback; `ggml_mul_mat` for the source conv
-- **Multi-backend** — weights auto-uploaded to backend buffers (CPU/Vulkan/CUDA/Metal); device shaders never read CPU memory
+- **Multi-backend** — weights auto-uploaded to backend buffers (CPU/Vulkan/CUDA/Metal); Metal uses a fused F32 implicit-GEMM direct convolution instead of materializing im2col
 - **F16/F32 dual precision (no quantization)** — F32 line (weights+compute fp32, exact baseline) and F16 line (fp16 weights, reserved for future fp16/bf16 training pilots)
 - **Mel front-ends** — `mel_nvstft` (DiffSinger hifigan front-end) + `MelExtractor` (ecosystem API parity)
 - **CLI + CTest** — single/batch vocode + CTest golden checks (pure numpy reference, no model assets)
@@ -101,7 +101,7 @@ surface is `pc_nsf_hifigan::HifiganModel` + `hifigan_run`, exercised end-to-end 
 ### For contributors
 
 - **No quantization path** — this repository deliberately **does not quantize**: the vocoder is numerically sensitive; F16/F32 only. Future fp16 training pilots are validated torch-side first.
-- **Dependency policy (D2-revised, 2026-08-30)** — ggml changes not accepted upstream go to `ggml-patch` (patch set). **Revised**: this repo's vocoder body now consumes patch-provided ops (`ggml_conv_direct_1d[_fused]`, `ggml_add_leaky_relu`), so a byte-identical snapshot of the 4 shipped patches (learned-ops / qvac / metal / vulkan-conv-direct-1d) lives in `./patches/` and is applied idempotently to the FetchContent-pulled stock ggml v0.19.0 at first configure (`cmake/ApplyGgmlPatches.cmake`). Clean checkouts build on every OS without manual steps; local pre-patched trees are detected and adopted (stamp file `.pcnsf-patches/`). See `docs/benchmarks.md` for what the patches buy.
+- **Dependency policy (D2-revised, 2026-08-30)** — ggml changes not accepted upstream go to `ggml-patch` (patch set). **Revised**: this repo's vocoder body now consumes patch-provided ops (`ggml_conv_direct_1d[_fused]`, `ggml_add_leaky_relu`), so snapshots of the 6 patches (learned ops, qvac ops, Metal ops, Vulkan direct convolution/pipeline cache, and Metal direct convolution) live in `./patches/` and are applied idempotently to the FetchContent-pulled stock ggml v0.19.0 at first configure (`cmake/ApplyGgmlPatches.cmake`). Clean checkouts build on every OS without manual steps; local pre-patched trees are detected and adopted (stamp file `.pcnsf-patches/`). See `docs/benchmarks.md` for what the patches buy.
 - **Numeric gate before commit** — run `tests/` golden comparison (`gen_hifigan_golden.py` + CTest t01/t02) before committing; wav output must match the torch reference.
 - **mininsf source sync** — source-generator changes live in `libmininsf`; this repo only consumes (FetchContent).
 
