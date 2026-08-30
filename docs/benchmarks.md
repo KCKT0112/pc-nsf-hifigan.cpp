@@ -139,3 +139,43 @@ python cmp_align.py vk.f32
 - **保精度张量核**（split-f16/Kahan 分解 GEMM）：基建级（数值正确的矩阵引擎 + 各家矩阵扩展代际维护）——按"拒绝拥有跨代指令集/扩展维护义务"的既定原则打住，与 CPU 侧 ISA 考量同构。
 
 **故 Vulkan 终态 = fp32 430–480 ms、max|Δ| 6.1314e-04（比 DML 紧约一个数量级）**，本文为最终测量文档；CPU 侧合同（≈ORT CPU EP，精度 ≥0.9999999）已达成并反超（§1），CPU 终态同此文档。
+
+---
+
+## §6 B-HMMA 真机 spike(§5 方向 B 的实证检验 · **NO-GO 终判**)
+
+在 §5 听证冻结 B、§(EP 噪声审计)把 B-sim 误差判为"corr/rms 在台站内、maxabs 出格且方向正交"之后,仍按用户拍板做了真机 spike(因为微基准 lvl1 9.19 TFLOPS 投影 1.54× 快于 DML 的收益值得实证一次)。实现走 `PCNSF_BHMMA=1` 环境分支:全部 K>1 conv 改 `cast(w→f16)` + `im2col_fast_1d(src1=f32→dst=f16, ow_align=16)` + `ggml_cont(wm16)` + `ggml_mul_mat(f16×f16→f32)`,io-fusion 禁用、bias/leaky/residual 改显式节点;K=1 / OC=1 走守卫返回 fp32。**分支代码整体保留在 `stash@{0}`("BHMMA spike"),主线仍是 fp32 direct conv。**
+
+### 6.1 真机数据(RTX 2070 · ggml v0.19.0+patch4 · 881 664 采样 / 20 s 片段)
+
+| 路径 | 暖机 wall(n=7 去首帧) | corr(vs CPU golden) | max\|Δ\| | rms |
+|---|---|---|---|---|
+| ONNX Runtime DML EP | ~282 ms | 0.9999969745 | 2.09e-03 | 1.52e-04 |
+| **fp32 direct conv(主线,终态)** | **433–480 ms** | **0.9999998460** | **6.13e-04** | **3.43e-05** |
+| B-sim(离线仿真,非真机) | — | 0.9999996909 | 3.94e-03 | 4.92e-05 |
+| **B-HMMA 真机 spike** | **1 294.1 ms(2.7× 慢于 fp32,4.6× 慢于 DML)** | **0.9999902022** | **1.365e-02** | 2.73e-04 |
+
+冷启动:B 1 691.9 ms vs fp32 1 489.4 ms。精度比 DML 还差一个数量级(corr 差一位,maxabs ~7×),速度全面倒退 → **双重 NO-GO**。
+
+### 6.2 慢在哪里(per-node profile,`PCNSF_PROFILE=1`,总 9 053.5 ms / 1 185 节点)
+
+1. **IM2COL_FAST_1D f16-dst n=97 均 49.9 ms**:学到的算子补丁只优化了 f32-dst,f16-dst 落回通用 kernel;
+2. **MUL_MAT f16 n=98 均 39.9 ms**:reshape(im2col) 的布局(stride/对齐)不满足 mul_mm/mul_mm_cm2 快路径要求,落回通用标量 kernel —— 同几何、干净 contiguous 输入下微基准为 1.18 ms,**图内惩罚 34×**;
+3. conv_post(K=1 / OC=1)单发 matvec-scalar **881 ms**(守卫 path 退化成 matvec);
+4. ADD n=154 92.3 ms、CPY n=196 78.1 ms:显式 epilogue 拆点额外开销。
+
+### 6.3 五个失效原因与"B↔E 坍缩"
+
+要把 B 做到微基准投影水平,需要:f16-dst im2col 专用 kernel + 放开 mul_mat 对输入布局的 stride/对齐限制 + OC=1 安全的 HMMA 路径 + 图内重融合 epilogue —— **这正是 §4/§5 已经否决的"基础设施级 E 改造"本身**。B 与 E 的边界在真机上坍缩:B 只有按 E 的工程强度去做才有意义,而 E 已被否决。故 B 在三个独立层面终结:
+
+- (a) §5 听证:严格合同(≥0.9999999)下 corr 不够;
+- (b) EP 噪声审计:DML-等价合同下 corr/rms 在台站内、maxabs 1.88× 出格、误差方向与 EP 族正交(R²=0.0023);
+- (c) §6 真机:速度 2.7× 倒退 + 精度比 DML 还差一位。
+
+### 6.4 保留资产
+
+- 微基准 `bench_mm_vk.exe` 证实 lvl1 配置在干净输入下确有 9.19 TFLOPS(>fp32 峰值 7.47,HMMA 生效)—— 说明瓶颈全在图内布局/缺 kernel,不在硅;
+- vk_shader 头以 文本形式进 git(此前阴影常量 PR 之后),`git status` 可直接看到 shader 再生成差异;
+- spike 评测脚本与数据(`work/_bhmma_prof.log` 等)留存 local notes,不入库。
+
+**终态建议(同 §5):冻结主线 fp32 direct conv;B/E 仅在 ggml 上游补齐 f16 im2col kernel 与 mul_mat 布局泛化后再议。**
