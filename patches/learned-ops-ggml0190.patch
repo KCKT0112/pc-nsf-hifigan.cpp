@@ -1,0 +1,3239 @@
+diff --git a/include/ggml.h b/include/ggml.h
+index 5cb49d0..818347a 100644
+--- a/include/ggml.h
++++ b/include/ggml.h
+@@ -590,6 +590,23 @@ extern "C" {
+ 
+         GGML_OP_GLU,
+ 
++        // learned-ops patch (ported from audio.cpp / ggmlR, see docs/)
++        GGML_OP_IM2COL_FAST_1D,
++        GGML_OP_SCATTER_ELEMENTS,
++        GGML_OP_REL_POS_BIAS,
++
++        // Fused add + leaky ReLU (HiFiGAN vocoder): out[t,c] = lrelu(a[t,c] +
++        // b[t,c or c], slope).  b is either a row-broadcast bias [1,C] or an
++        // elementwise residual [T,C]; collapses conv-bias-add + activation +
++        // residual-add chains into a single pass.
++        GGML_OP_ADD_LEAKY_RELU,
++
++        // Fused stride-1 direct 1D convolution (HiFiGAN vocoder): packs the
++        // kernel to [IC*K, OC] once per call and runs AVX2-blocked output
++        // tiles without materializing an im2col buffer; optional bias add +
++        // leaky ReLU in the epilogue.  CPU only.
++        GGML_OP_CONV_DIRECT_1D,
++
+         GGML_OP_COUNT,
+     };
+ 
+@@ -1679,6 +1696,20 @@ extern "C" {
+             struct ggml_tensor  * b,  // row indices
+             struct ggml_tensor  * c); // data for ggml_get_rows, only used for its shape
+ 
++    // ONNX ScatterElements (ported from ggmlR):
++    //   data:    [ne0, ne1, ...]  — base tensor (copied to output first)
++    //   updates: [ne0, n_idx, ...] — values to scatter
++    //   indices: [n_idx] i32      — row indices into data
++    //   reduction: 0=none(overwrite), 1=add
++    // axis is in ggml dim order (0 = ne[0]); output shape = data shape.
++    GGML_API struct ggml_tensor * ggml_scatter_elements(
++            struct ggml_context * ctx,
++            struct ggml_tensor  * data,
++            struct ggml_tensor  * updates,
++            struct ggml_tensor  * indices,
++            int                   reduction,
++            int                   axis);
++
+     // a TD  [n_embd, ne1,    ne2,    ne3]
+     // b TS  [n_embd, n_rows, ne02,   ne03] | ne02 == ne2, ne03 == ne3
+     // c I64 [n_rows, ne11,   ne12,   1]    | c[i] in [0, ne1)
+@@ -2036,6 +2067,37 @@ extern "C" {
+             int                   p0,  // padding
+             int                   d0); // dilation
+ 
++    // Public form of the im2col tagged with GGML_OP_IM2COL_FAST_1D (see the
++    // conv_1d_fast_1d_im2col comment below).  The explicit dst_type lets
++    // precision-sensitive callers keep an F32 im2col buffer (GGML_TYPE_F32)
++    // while still getting the 1D-specialized CPU kernel; passing
++    // GGML_TYPE_F16 reproduces the stock ggml_conv_1d memory layout.
++    // ow_align > 1 rounds the output length up to a multiple of ow_align
++    // (extra rows come from zero windows == conv zero padding, so callers can
++    // crop them with a free view); use it to keep GEMM-friendly shapes.
++    GGML_API struct ggml_tensor * ggml_im2col_fast_1d(
++            struct ggml_context * ctx,
++            struct ggml_tensor  * a,   // convolution kernel [K, IC, OC]
++            struct ggml_tensor  * b,   // data [T, IC]
++            int                   s0,  // stride
++            int                   p0,  // padding
++            int                   d0,  // dilation
++            enum ggml_type        dst_type,
++            int                   ow_align);
++
++    // ggml_conv_1d variant that tags the intermediate im2col tensor with
++    // GGML_OP_IM2COL_FAST_1D so CPU schedules the 1D-specialized kernel
++    // (O(1) valid-window memcpy per row instead of the generic im2col loops).
++    // Geometry and op_params are identical to ggml_conv_1d (ported from
++    // 0xShug0/audio.cpp).
++    GGML_API struct ggml_tensor * ggml_conv_1d_fast_1d_im2col(
++            struct ggml_context * ctx,
++            struct ggml_tensor  * a,   // convolution kernel
++            struct ggml_tensor  * b,   // data
++            int                   s0,  // stride
++            int                   p0,  // padding
++            int                   d0); // dilation
++
+     // conv_1d with padding = half
+     // alias for ggml_conv_1d(a, b, s, a->ne[0]/2, d)
+     GGML_API struct ggml_tensor* ggml_conv_1d_ph(
+@@ -2070,6 +2132,25 @@ extern "C" {
+             int                   p0,  // padding
+             int                   d0); // dilation
+ 
++    // extended ggml_conv_transpose_1d (ported from mmwillet/TTS.cpp's ggml fork):
++    //   op0: extra output size added at the end of the output (PyTorch
++    //        output_padding); the kernel leaves these positions at zero, a
++    //        following ggml_add can supply bias there.
++    //   g0:  grouped transposed convolution (PyTorch groups): a is
++    //        [K, Cout/g0, Cin/g0], output has a->ne[1]*g0 channels. For
++    //        g0 == 1 the layout matches plain ggml_conv_transpose_1d.
++    // Note: the 6-arg ggml_conv_transpose_1d below is kept unchanged and
++    // delegates here with op0=0, g0=1.
++    GGML_API struct ggml_tensor * ggml_conv_transpose_1d_ext(
++            struct ggml_context * ctx,
++            struct ggml_tensor  * a,   // convolution kernel [K, Cout/g0, Cin/g0]
++            struct ggml_tensor  * b,   // data [L, Cin, N]
++            int                   s0,  // stride
++            int                   p0,  // padding
++            int                   d0,  // dilation (must be 1)
++            int                   op0, // output padding
++            int                   g0); // groups
++
+     GGML_API struct ggml_tensor * ggml_conv_2d(
+             struct ggml_context * ctx,
+             struct ggml_tensor  * a,   // convolution kernel
+@@ -2511,6 +2592,71 @@ extern "C" {
+             struct ggml_tensor  * pw,
+             struct ggml_tensor  * ph);
+ 
++    /* 2D Relative Position Bias (BoTNet-style, ported from ggmlR).
++     * x:    [C, H*W, B]  — query/key features (col-major)
++     * wcat: [rel_h+rel_w, C]  — concat(W_h, W_w) weight table (col-major)
++     * H, W: spatial dims; returns [H*W, H*W, B] bias matrix.
++     * out[b, q, k] = dot(x[b, q, :], wcat[:, hq-hk+H-1])
++     *              + dot(x[b, wq*H+hq, :], wcat[:, rel_h + wq-wk+W-1]) */
++    GGML_API struct ggml_tensor * ggml_rel_pos_bias(
++            struct ggml_context * ctx,
++            struct ggml_tensor  * x,
++            struct ggml_tensor  * wcat,
++            int                   H,
++            int                   W);
++
++    // --- learned-ops patch: HiFiGAN vocoder fusion ----------------------------
++    // Fused add + leaky ReLU: out = ((v > 0) ? v : 0) + slope * ((v < 0) ? v : 0)
++    // with v = a + b, bit-identical to ggml_add followed by ggml_leaky_relu.
++    // a: [T, C] contiguous F32; b: [1, C] row-broadcast bias (per-channel
++    // scalar) or [T, C] elementwise operand (e.g. a residual), contiguous F32.
++    // CPU only (other backends fall back by not emitting the op).
++    GGML_API struct ggml_tensor * ggml_add_leaky_relu(
++            struct ggml_context * ctx,
++            struct ggml_tensor  * a,      // [T, C]
++            struct ggml_tensor  * b,      // [1, C] or [T, C]
++            float                 slope);
++
++    // --- learned-ops patch: HiFiGAN direct conv --------------------------------
++    // Fused stride-1 1D convolution with in-kernel weight packing (no im2col
++    // buffer): out[t, oc] = sum_{ic,kw} w[kw, ic, oc] * x[t + kw*dil - pad, ic]
++    // + bias[oc], then leaky ReLU(slope) when slope != 0 (bit-identical to
++    // conv -> ggml_add -> ggml_leaky_relu).
++    //   w:    [K, IC, OC] F32 (standard layout, any strides ok)
++    //   x:    [T, IC] contiguous F32
++    //   bias: [OC] F32 or NULL
++    //   out:  [OL, OC] with OL = T + 2*pad - dil*(K-1)
++    // CPU only; other backends never emit the op.
++    GGML_API struct ggml_tensor * ggml_conv_direct_1d(
++            struct ggml_context * ctx,
++            struct ggml_tensor  * w,      // [K, IC, OC]
++            struct ggml_tensor  * x,      // [T, IC]
++            struct ggml_tensor  * bias,   // [OC] or NULL
++            int                   pad,
++            int                   dil,
++            float                 leaky_slope);   // 0 = no activation
++
++    // fused variant with two extra producer-side fusions (CPU only):
++    //   res:       [OL, OC] contiguous or NULL; when set the epilogue adds it
++    //              (out = (bias + acc) + res, the same association as
++    //              ggml_add(conv_out, res)) replacing a separate ADD node.
++    //   in_scale:  multiply x while packing the padded copy (replaces
++    //              ggml_scale; 1.0f = off).  Applied first, i.e. pad(x*s).
++    //   in_slope:  leaky-ReLU applied to x while packing (replaces a preceding
++    //              ggml_leaky_relu; 0.0f = off).  Applied after in_scale:
++    //              pad(leaky(x * s)) == leaky(ggml_scale(x, s)) bit-identically.
++    GGML_API struct ggml_tensor * ggml_conv_direct_1d_fused(
++            struct ggml_context * ctx,
++            struct ggml_tensor  * w,      // [K, IC, OC]
++            struct ggml_tensor  * x,      // [T, IC]
++            struct ggml_tensor  * bias,   // [OC] or NULL
++            struct ggml_tensor  * res,    // [OL, OC] or NULL
++            int                   pad,
++            int                   dil,
++            float                 leaky_slope,   // 0 = no output activation
++            float                 in_scale,      // 1 = no input scaling
++            float                 in_slope);     // 0 = no input activation
++
+     GGML_API struct ggml_tensor * ggml_rwkv_wkv6(
+             struct ggml_context * ctx,
+             struct ggml_tensor  * k,
+diff --git a/src/ggml-backend-meta.cpp b/src/ggml-backend-meta.cpp
+index a5a3a58..ff85943 100644
+--- a/src/ggml-backend-meta.cpp
++++ b/src/ggml-backend-meta.cpp
+@@ -823,7 +823,8 @@ static struct ggml_backend_meta_split_state ggml_backend_meta_get_split_state(
+                 split_state = handle_generic(src_ss, /*scalar_only =*/ true);
+             } break;
+             case GGML_OP_ADD:
+-            case GGML_OP_ADD_ID: {
++            case GGML_OP_ADD_ID:
++            case GGML_OP_ADD_LEAKY_RELU: {
+                 split_state = handle_bin_bcast(src_ss);
+             } break;
+             case GGML_OP_ADD1:
+@@ -927,6 +928,8 @@ static struct ggml_backend_meta_split_state ggml_backend_meta_get_split_state(
+             } break;
+             case GGML_OP_CONV_TRANSPOSE_1D:
+             case GGML_OP_IM2COL:
++            case GGML_OP_IM2COL_FAST_1D:
++            case GGML_OP_CONV_DIRECT_1D:
+             case GGML_OP_IM2COL_BACK:
+             case GGML_OP_IM2COL_3D:
+             case GGML_OP_CONV_2D:
+diff --git a/src/ggml-cpu/ggml-cpu.c b/src/ggml-cpu/ggml-cpu.c
+index 491316f..afd73a1 100644
+--- a/src/ggml-cpu/ggml-cpu.c
++++ b/src/ggml-cpu/ggml-cpu.c
+@@ -1913,6 +1913,10 @@ static void ggml_compute_forward(struct ggml_compute_params * params, struct ggm
+             {
+                 ggml_compute_forward_im2col(params, tensor);
+             } break;
++        case GGML_OP_IM2COL_FAST_1D:
++            {
++                ggml_compute_forward_im2col_fast_1d(params, tensor);
++            } break;
+         case GGML_OP_IM2COL_BACK:
+             {
+                 ggml_compute_forward_im2col_back_f32(params, tensor);
+@@ -1925,6 +1929,14 @@ static void ggml_compute_forward(struct ggml_compute_params * params, struct ggm
+             {
+                 ggml_compute_forward_col2im_1d(params, tensor);
+             } break;
++        case GGML_OP_SCATTER_ELEMENTS:
++            {
++                ggml_compute_forward_scatter_elements(params, tensor);
++            } break;
++        case GGML_OP_REL_POS_BIAS:
++            {
++                ggml_compute_forward_rel_pos_bias(params, tensor);
++            } break;
+         case GGML_OP_CONV_2D:
+             {
+                 ggml_compute_forward_conv_2d(params, tensor);
+@@ -1965,6 +1977,14 @@ static void ggml_compute_forward(struct ggml_compute_params * params, struct ggm
+             {
+                 ggml_compute_forward_pad_reflect_1d(params, tensor);
+             } break;
++        case GGML_OP_ADD_LEAKY_RELU:
++            {
++                ggml_compute_forward_add_leaky_relu(params, tensor);
++            } break;
++        case GGML_OP_CONV_DIRECT_1D:
++            {
++                ggml_compute_forward_conv_direct_1d(params, tensor);
++            } break;
+         case GGML_OP_ROLL:
+             {
+                 ggml_compute_forward_roll(params, tensor);
+@@ -2264,10 +2284,15 @@ static int ggml_get_n_tasks(struct ggml_tensor * node, int n_threads) {
+             } break;
+         case GGML_OP_REPEAT:
+         case GGML_OP_REPEAT_BACK:
+-        case GGML_OP_LEAKY_RELU:
+             {
+                 n_tasks = 1;
+             } break;
++        case GGML_OP_LEAKY_RELU:
++            {
++                // learned-ops patch: run multi-threaded (row split, identical
++                // arithmetic per element); upstream forced n_tasks = 1
++                n_tasks = n_threads;
++            } break;
+         case GGML_OP_UNARY:
+             switch (ggml_get_unary_op(node)) {
+                 case GGML_UNARY_OP_ABS:
+@@ -2370,6 +2395,7 @@ static int ggml_get_n_tasks(struct ggml_tensor * node, int n_threads) {
+                 n_tasks = MIN(n_threads, ggml_nrows(node->src[0]));
+             } break;
+         case GGML_OP_IM2COL:
++        case GGML_OP_IM2COL_FAST_1D:
+         case GGML_OP_IM2COL_BACK:
+         case GGML_OP_IM2COL_3D:
+         case GGML_OP_CONV_2D:
+@@ -2381,6 +2407,11 @@ static int ggml_get_n_tasks(struct ggml_tensor * node, int n_threads) {
+             {
+                 n_tasks = n_threads;
+             } break;
++        case GGML_OP_SCATTER_ELEMENTS:
++        case GGML_OP_REL_POS_BIAS:
++            {
++                n_tasks = 1;
++            } break;
+         case GGML_OP_POOL_1D:
+         case GGML_OP_POOL_2D:
+         case GGML_OP_POOL_2D_BACK:
+@@ -2390,6 +2421,8 @@ static int ggml_get_n_tasks(struct ggml_tensor * node, int n_threads) {
+         case GGML_OP_UPSCALE:
+         case GGML_OP_PAD:
+         case GGML_OP_PAD_REFLECT_1D:
++        case GGML_OP_ADD_LEAKY_RELU:
++        case GGML_OP_CONV_DIRECT_1D:
+         case GGML_OP_ROLL:
+         case GGML_OP_ARANGE:
+         case GGML_OP_TIMESTEP_EMBEDDING:
+@@ -2879,6 +2912,15 @@ struct ggml_cplan ggml_graph_plan(
+                             cur = ggml_type_size(GGML_TYPE_F32) * node->src[0]->ne[0] * n_tasks;
+                         }
+                     } break;
++                case GGML_OP_CONV_DIRECT_1D:
++                    {
++                        // packed kernel [IC*K, OCp] + padded bias + padded X rows
++                        const int64_t OCp = ((node->src[0]->ne[2] + 15) / 16) * 16;
++                        const int64_t pad = ggml_get_op_params_i32(node, 0);
++                        const int64_t L   = node->src[1]->ne[0] + 2*pad;
++                        cur = sizeof(float) * (OCp * node->src[0]->ne[1] * node->src[0]->ne[0]
++                                               + OCp + node->src[1]->ne[1] * L);
++                    } break;
+                 case GGML_OP_SET_ROWS:
+                     {
+                         if (node->src[0]->type == GGML_TYPE_F16 && node->type != GGML_TYPE_F16) {
+diff --git a/src/ggml-cpu/ops.cpp b/src/ggml-cpu/ops.cpp
+index 42ec809..e8fd2f1 100644
+--- a/src/ggml-cpu/ops.cpp
++++ b/src/ggml-cpu/ops.cpp
+@@ -11,6 +11,7 @@
+ #include <algorithm>
+ #include <cfloat>
+ #include <cmath>
++#include <vector>
+ 
+ // ggml_compute_forward_dup
+ 
+@@ -2704,10 +2705,6 @@ static void ggml_compute_forward_leaky_relu_f32(
+ 
+     const ggml_tensor * src0 = dst->src[0];
+ 
+-    if (params->ith != 0) {
+-        return;
+-    }
+-
+     assert(ggml_is_contiguous_1(src0));
+     assert(ggml_is_contiguous_1(dst));
+     assert(ggml_are_same_shape(src0, dst));
+@@ -2721,7 +2718,12 @@ static void ggml_compute_forward_leaky_relu_f32(
+     assert(dst->nb[0]  == sizeof(float));
+     assert(src0->nb[0] == sizeof(float));
+ 
+-    for (int i = 0; i < n; i++) {
++    // learned-ops patch: parallelize over rows (upstream ran single-threaded,
++    // `if (params->ith != 0) return;`); identical arithmetic per element.
++    const int ith = params->ith;
++    const int nth = params->nth;
++
++    for (int i = ith; i < n; i += nth) {
+         ggml_vec_leaky_relu_f32(nc,
+                 (float *) ((char *) dst->data  + i*( dst->nb[1])),
+                 (float *) ((char *) src0->data + i*(src0->nb[1])), negative_slope);
+@@ -6169,7 +6171,7 @@ static void ggml_compute_forward_conv_transpose_1d_f16_f32(
+     if (ith == 0) {
+         memset(params->wdata, 0, params->wsize);
+ 
+-        // permute kernel data (src0) from (K x Cout x Cin) to (Cin x K x Cout)
++        // permute kernel data (src0) from (K x Cout_pg x Cin_g) to (Cin_g x K x Cout_pg)
+         {
+             ggml_fp16_t * const wdata = (ggml_fp16_t *) params->wdata + 0;
+ 
+@@ -6203,6 +6205,14 @@ static void ggml_compute_forward_conv_transpose_1d_f16_f32(
+     ggml_barrier(params->threadpool);
+ 
+     const int32_t s0 = ((const int32_t*)(dst->op_params))[0];
++    const int32_t p0 = ((const int32_t*)(dst->op_params))[1];
++    const int32_t g0 = ((const int32_t*)(dst->op_params))[3];
++
++    // grouped transpose conv: dst row i1 is output channel i1; the weight
++    // block for this thread is the per-group slice (i1 % ne01), and the
++    // input channels for its group start at (i1 / ne01) * ne02. With
++    // g0 == 1 this reduces to the plain (un-grouped) layout.
++    const int64_t cout_pg = ne01;
+ 
+     // total rows in dst
+     const int nr = ne1;
+@@ -6219,15 +6229,20 @@ static void ggml_compute_forward_conv_transpose_1d_f16_f32(
+ 
+     for (int i1 = ir0; i1 < ir1; i1++) {
+         float * dst_data = (float *)((char *) dst->data + i1*nb1);
+-        ggml_fp16_t * wdata_kernel = wdata + i1*ne02*ne00;
++        ggml_fp16_t * wdata_kernel = wdata + (i1 % cout_pg)*ne02*ne00;
++        const int i1g = (i1 / cout_pg)*ne02;
+         for (int i10 = 0; i10 < ne10; i10++) {
+-            const int i1n = i10*ne11;
++            const int i1n = i10*ne11 + i1g;
+             for (int i00 = 0; i00 < ne00; i00++) {
++                const int64_t o = (int64_t)i10*s0 + i00 - p0;
++                if (o < 0 || o >= ne0) {
++                    continue;
++                }
+                 float v = 0;
+                 ggml_vec_dot_f16(ne02, &v, 0,
+                         (ggml_fp16_t *)    wdata_src + i1n, 0,
+                         (ggml_fp16_t *) wdata_kernel + i00*ne02, 0, 1);
+-                dst_data[i10*s0 + i00] += v;
++                dst_data[o] += v;
+             }
+         }
+     }
+@@ -6257,7 +6272,7 @@ static void ggml_compute_forward_conv_transpose_1d_f32(
+     if (ith == 0) {
+         memset(params->wdata, 0, params->wsize);
+ 
+-        // prepare kernel data (src0) from (K x Cout x Cin) to (Cin x K x Cout)
++        // prepare kernel data (src0) from (K x Cout_pg x Cin_g) to (Cin_g x K x Cout_pg)
+         {
+             float * const wdata = (float *) params->wdata + 0;
+ 
+@@ -6291,6 +6306,11 @@ static void ggml_compute_forward_conv_transpose_1d_f32(
+     ggml_barrier(params->threadpool);
+ 
+     const int32_t s0 = ((const int32_t*)(dst->op_params))[0];
++    const int32_t p0 = ((const int32_t*)(dst->op_params))[1];
++    const int32_t g0 = ((const int32_t*)(dst->op_params))[3];
++
++    // grouped transpose conv: see the f16 kernel above
++    const int64_t cout_pg = ne01;
+ 
+     // total rows in dst
+     const int nr = ne1;
+@@ -6307,15 +6327,20 @@ static void ggml_compute_forward_conv_transpose_1d_f32(
+ 
+     for (int i1 = ir0; i1 < ir1; i1++) {
+         float * dst_data = (float *)((char *) dst->data + i1*nb1);
+-        float * wdata_kernel = wdata + i1*ne02*ne00;
++        float * wdata_kernel = wdata + (i1 % cout_pg)*ne02*ne00;
++        const int i1g = (i1 / cout_pg)*ne02;
+         for (int i10 = 0; i10 < ne10; i10++) {
+-            const int i1n = i10*ne11;
++            const int i1n = i10*ne11 + i1g;
+             for (int i00 = 0; i00 < ne00; i00++) {
++                const int64_t o = (int64_t)i10*s0 + i00 - p0;
++                if (o < 0 || o >= ne0) {
++                    continue;
++                }
+                 float v = 0;
+                 ggml_vec_dot_f32(ne02, &v, 0,
+                         wdata_src + i1n, 0,
+                         wdata_kernel + i00*ne02, 0, 1);
+-                dst_data[i10*s0 + i00] += v;
++                dst_data[o] += v;
+             }
+         }
+     }
+@@ -6522,6 +6547,224 @@ void ggml_compute_forward_im2col(
+     }
+ }
+ 
++// ggml_compute_forward_im2col_fast_1d (ported from 0xShug0/audio.cpp)
++//
++// 1D-specialized im2col: per output position the contributing input window
++// is a contiguous range [ikw0, ikw1) computed in O(1); the head/tail are
++// zero-filled and the valid part is memcpy'd when dilation == 1 (F16 keeps
++// a strided loop when src1 is F32). Same dst layout as ggml im2col:
++// [N, OW, IC*KW].
++
++static inline int64_t ggml_div_ceil_nonneg(int64_t num, int64_t den) {
++    GGML_ASSERT(num >= 0);
++    GGML_ASSERT(den > 0);
++    return (num + den - 1) / den;
++}
++
++static inline int64_t ggml_im2col_1d_valid_start(int64_t base, int64_t step) {
++    if (base >= 0) {
++        return 0;
++    }
++    return ggml_div_ceil_nonneg(-base, step);
++}
++
++static inline int64_t ggml_im2col_1d_valid_end(int64_t base, int64_t step, int64_t width, int64_t kw) {
++    if (width <= 0 || base > width - 1) {
++        return 0;
++    }
++    const int64_t max_ikw = (width - 1 - base) / step;
++    return std::min<int64_t>(kw, max_ikw + 1);
++}
++
++static void ggml_compute_forward_im2col_f32_1d(
++        const ggml_compute_params * params,
++              ggml_tensor * dst) {
++
++    const ggml_tensor * src0 = dst->src[0];
++    const ggml_tensor * src1 = dst->src[1];
++
++    GGML_ASSERT(src1->type == GGML_TYPE_F32);
++    GGML_ASSERT(dst->type == GGML_TYPE_F32);
++
++    GGML_TENSOR_BINARY_OP_LOCALS;
++
++    const int32_t s0 = ((const int32_t *)(dst->op_params))[0];
++    const int32_t p0 = ((const int32_t *)(dst->op_params))[2];
++    const int32_t d0 = ((const int32_t *)(dst->op_params))[4];
++
++    const int ith = params->ith;
++    const int nth = params->nth;
++
++    const int64_t N  = ne12;
++    const int64_t IC = ne11;
++    const int64_t IW = ne10;
++    const int64_t KW = ne00;
++    const int64_t OW = ne1;
++
++    const int ofs0 = nb12;
++    const int ofs1 = nb11;
++
++    GGML_ASSERT(nb10 == sizeof(float));
++
++    float * const wdata = (float *) dst->data;
++
++    // Thread split over output positions (NOT channels): each thread writes a
++    // contiguous range of [IC*KW] rows, so stores are full streaming lines.
++    // (A channel-strided split interleaves KW-float stores from nth threads
++    // into the same rows and write-combining collapses; measured ~8x slower
++    // on 16 threads.)  Within a row the per-channel KW blocks are adjacent,
++    // so the whole row is written sequentially.
++    //
++    // Additionally the thread's row range is processed in tiles sized so the
++    // per-channel source segments stay L2-resident across the tile: with a
++    // plain iow-major loop every output row re-reads KW floats from each of
++    // the IC channel rows and the working set (IC x T floats) overflows L2/L3,
++    // so reads stream from RAM OW/KW times.  Tiling restores read locality.
++    const int64_t tile = std::max<int64_t>(32, std::min<int64_t>(
++        4096, (int64_t)(32768 / (IC * (KW + 1)))));  // ~128KB src+dst per tile
++
++    for (int64_t in = 0; in < N; ++in) {
++        const int64_t rows = OW;
++        const int64_t chunk = (rows + nth - 1) / nth;
++        const int64_t iow0 = ith * chunk;
++        const int64_t iow1 = std::min(rows, iow0 + chunk);
++
++        for (int64_t t0 = iow0; t0 < iow1; t0 += tile) {
++            const int64_t t1 = std::min(iow1, t0 + tile);
++            for (int64_t iow = t0; iow < t1; ++iow) {
++                const int64_t base = iow*s0 - p0;
++                const int64_t ikw0 = ggml_im2col_1d_valid_start(base, d0);
++                const int64_t ikw1 = ggml_im2col_1d_valid_end(base, d0, IW, KW);
++                const int64_t ncopy = ikw1 - ikw0;
++
++                float * const dst_row = wdata + (in*OW + iow)*(IC*KW);
++                for (int64_t iic = 0; iic < IC; ++iic) {
++                    const float * const src_row = (const float *)((const char *) src1->data + in*ofs0 + iic*ofs1);
++                    float * const dst_blk = dst_row + iic*KW;
++
++                    if (ikw0 > 0) {
++                        memset(dst_blk, 0, ikw0*sizeof(float));
++                    }
++                    if (ncopy > 0) {
++                        if (d0 == 1) {
++                            const float * s = src_row + base + ikw0;
++                            float * d = dst_blk + ikw0;
++                            if (ncopy <= 8) {
++                                // inline: a memcpy call for 12-32B costs more
++                                // than the copy itself at KW=3..8
++                                for (int64_t k = 0; k < ncopy; ++k) d[k] = s[k];
++                            } else {
++                                memcpy(d, s, ncopy*sizeof(float));
++                            }
++                        } else {
++                            int64_t iiw = base + ikw0*d0;
++                            for (int64_t ikw = ikw0; ikw < ikw1; ++ikw, iiw += d0) {
++                                dst_blk[ikw] = src_row[iiw];
++                            }
++                        }
++                    }
++                    if (ikw1 < KW) {
++                        memset(dst_blk + ikw1, 0, (KW - ikw1)*sizeof(float));
++                    }
++                }
++            }
++        }
++    }
++}
++
++static void ggml_compute_forward_im2col_f16_1d(
++        const ggml_compute_params * params,
++              ggml_tensor * dst) {
++
++    const ggml_tensor * src0 = dst->src[0];
++    const ggml_tensor * src1 = dst->src[1];
++
++    // note: im2col never reads the kernel (src0); it only unfolds src1.
++    GGML_ASSERT(src1->type == GGML_TYPE_F16 || src1->type == GGML_TYPE_F32);
++    GGML_ASSERT(dst->type == GGML_TYPE_F16);
++
++    GGML_TENSOR_BINARY_OP_LOCALS;
++
++    const int32_t s0 = ((const int32_t *)(dst->op_params))[0];
++    const int32_t p0 = ((const int32_t *)(dst->op_params))[2];
++    const int32_t d0 = ((const int32_t *)(dst->op_params))[4];
++
++    const int ith = params->ith;
++    const int nth = params->nth;
++
++    const int64_t N  = ne12;
++    const int64_t IC = ne11;
++    const int64_t IW = ne10;
++    const int64_t KW = ne00;
++    const int64_t OW = ne1;
++
++    const int ofs0 = nb12;
++    const int ofs1 = nb11;
++
++    GGML_ASSERT(nb10 == ggml_type_size(src1->type));
++
++    ggml_fp16_t * const wdata = (ggml_fp16_t *) dst->data;
++
++    for (int64_t in = 0; in < N; ++in) {
++        for (int64_t iow = 0; iow < OW; ++iow) {
++            const int64_t base = iow*s0 - p0;
++            const int64_t ikw0 = ggml_im2col_1d_valid_start(base, d0);
++            const int64_t ikw1 = ggml_im2col_1d_valid_end(base, d0, IW, KW);
++
++            for (int64_t iic = ith; iic < IC; iic += nth) {
++                ggml_fp16_t * const dst_row = wdata + (in*OW + iow)*(IC*KW) + iic*KW;
++                const float * const src_row_f32 = src1->type == GGML_TYPE_F32
++                    ? (const float *)((const char *) src1->data + in*ofs0 + iic*ofs1)
++                    : nullptr;
++                const ggml_fp16_t * const src_row_f16 = src1->type == GGML_TYPE_F16
++                    ? (const ggml_fp16_t *)((const char *) src1->data + in*ofs0 + iic*ofs1)
++                    : nullptr;
++
++                if (ikw0 > 0) {
++                    memset(dst_row, 0, ikw0*sizeof(ggml_fp16_t));
++                }
++                if (ikw1 > ikw0) {
++                    if (src_row_f16 != nullptr && d0 == 1) {
++                        memcpy(dst_row + ikw0, src_row_f16 + base + ikw0, (ikw1 - ikw0)*sizeof(ggml_fp16_t));
++                    } else if (src_row_f16 != nullptr) {
++                        int64_t iiw = base + ikw0*d0;
++                        for (int64_t ikw = ikw0; ikw < ikw1; ++ikw, iiw += d0) {
++                            dst_row[ikw] = src_row_f16[iiw];
++                        }
++                    } else {
++                        int64_t iiw = base + ikw0*d0;
++                        for (int64_t ikw = ikw0; ikw < ikw1; ++ikw, iiw += d0) {
++                            dst_row[ikw] = GGML_CPU_FP32_TO_FP16(src_row_f32[iiw]);
++                        }
++                    }
++                }
++                if (ikw1 < KW) {
++                    memset(dst_row + ikw1, 0, (KW - ikw1)*sizeof(ggml_fp16_t));
++                }
++            }
++        }
++    }
++}
++
++void ggml_compute_forward_im2col_fast_1d(
++        const ggml_compute_params * params,
++              ggml_tensor * dst) {
++    switch (dst->type) {
++        case GGML_TYPE_F16:
++            {
++                ggml_compute_forward_im2col_f16_1d(params, dst);
++            } break;
++        case GGML_TYPE_F32:
++            {
++                ggml_compute_forward_im2col_f32_1d(params, dst);
++            } break;
++        default:
++            {
++                GGML_ABORT("fatal error");
++            }
++    }
++}
++
+ // ggml_compute_forward_im2col_back_f32
+ 
+ void ggml_compute_forward_im2col_back_f32(
+@@ -10248,6 +10491,475 @@ void ggml_compute_forward_add_rel_pos(
+     }
+ }
+ 
++// ggml_compute_forward_scatter_elements (ported from ggmlR)
++
++void ggml_compute_forward_scatter_elements(
++        const ggml_compute_params * params,
++        ggml_tensor * dst) {
++    if (params->ith != 0) return;
++
++    const ggml_tensor * data    = dst->src[0];  // base tensor to copy
++    const ggml_tensor * updates = dst->src[1];  // values to scatter
++    const ggml_tensor * indices = dst->src[2];  // indices (I32, same shape as updates)
++
++    GGML_ASSERT(data->type    == GGML_TYPE_F32);
++    GGML_ASSERT(updates->type == GGML_TYPE_F32);
++    GGML_ASSERT(indices->type == GGML_TYPE_I32);
++    GGML_ASSERT(ggml_is_contiguous(dst));
++
++    int32_t op_params[2];
++    memcpy(op_params, dst->op_params, sizeof(op_params));
++    const int reduction = op_params[0];
++    const int axis      = op_params[1];
++
++    /* Copy data → dst */
++    memcpy(dst->data, data->data, ggml_nbytes(data));
++
++    const int32_t * idx = (const int32_t *)indices->data;
++    const float   * upd = (const float *)updates->data;
++    float         * out = (float *)dst->data;
++
++    /* ONNX ScatterElements: for each element in updates/indices:
++     * dst_index = same as updates_index, except along 'axis' dim
++     * where it is replaced by indices[updates_index].
++     *
++     * updates and indices have the same shape. data/dst may differ
++     * from updates along the scatter axis but must match elsewhere.
++     *
++     * We iterate over all elements of updates linearly. For each,
++     * decompose into multi-index (i0,i1,i2,i3), look up the index
++     * value, compute the output flat offset. */
++    const int64_t n_upd = ggml_nelements(updates);
++    const int64_t dst_ne[4]  = { dst->ne[0], dst->ne[1], dst->ne[2], dst->ne[3] };
++    const int64_t upd_ne[4]  = { updates->ne[0], updates->ne[1], updates->ne[2], updates->ne[3] };
++
++    /* dst strides in elements (contiguous) */
++    const int64_t dst_stride[4] = {
++        1,
++        dst_ne[0],
++        dst_ne[0] * dst_ne[1],
++        dst_ne[0] * dst_ne[1] * dst_ne[2]
++    };
++    /* updates strides in elements (contiguous) */
++    const int64_t upd_stride[4] = {
++        1,
++        upd_ne[0],
++        upd_ne[0] * upd_ne[1],
++        upd_ne[0] * upd_ne[1] * upd_ne[2]
++    };
++
++    for (int64_t flat = 0; flat < n_upd; flat++) {
++        /* Decompose flat index into multi-index for updates */
++        int64_t rem = flat;
++        int64_t mi[4];
++        mi[3] = rem / upd_stride[3]; rem %= upd_stride[3];
++        mi[2] = rem / upd_stride[2]; rem %= upd_stride[2];
++        mi[1] = rem / upd_stride[1]; rem %= upd_stride[1];
++        mi[0] = rem;
++
++        /* Build dst multi-index: same as updates, except axis dim = indices[flat] */
++        int64_t di[4] = { mi[0], mi[1], mi[2], mi[3] };
++        di[axis] = (int64_t)idx[flat];
++
++        int64_t dst_flat = di[0] * dst_stride[0] + di[1] * dst_stride[1]
++                         + di[2] * dst_stride[2] + di[3] * dst_stride[3];
++
++        if (reduction == 1) {
++            out[dst_flat] += upd[flat];
++        } else {
++            out[dst_flat] = upd[flat];
++        }
++    }
++}
++
++// ggml_compute_forward_rel_pos_bias (ported from ggmlR)
++
++void ggml_compute_forward_rel_pos_bias(const ggml_compute_params * params, ggml_tensor * dst) {
++    if (params->ith != 0) return;
++
++    const ggml_tensor * x    = dst->src[0];
++    const ggml_tensor * wcat = dst->src[1];
++
++    const int H     = ggml_get_op_params_i32(dst, 0);
++    const int W     = ggml_get_op_params_i32(dst, 1);
++    const int B     = ggml_get_op_params_i32(dst, 2);
++    const int C     = ggml_get_op_params_i32(dst, 3);
++    const int rel_h = ggml_get_op_params_i32(dst, 4);
++    const int rel_w = (2 * W - 1);
++    const int HW    = H * W;
++    const int Wstride = rel_h + rel_w;
++
++    const float * xdata = (const float *)x->data;
++    const float * Wdata = (const float *)wcat->data;
++    float       * out   = (float *)dst->data;
++
++    memset(out, 0, (size_t)B * HW * HW * sizeof(float));
++
++    for (int b = 0; b < B; b++) {
++        const float * xb = xdata + (size_t)b * C * HW;
++        for (int hq = 0; hq < H; hq++) {
++            for (int wq = 0; wq < W; wq++) {
++                const int q_idx = hq * W + wq;
++                const float * x_hw = xb + (size_t)q_idx * C;
++                const float * x_wh = xb + (size_t)(wq * H + hq) * C;
++
++                for (int hk = 0; hk < H; hk++) {
++                    const int r_h = hq - hk + H - 1;
++                    float dot_h = 0.0f;
++                    for (int ci = 0; ci < C; ci++)
++                        dot_h += x_hw[ci] * Wdata[r_h + ci * Wstride];
++
++                    for (int wk = 0; wk < W; wk++) {
++                        const int r_w = wq - wk + W - 1;
++                        float dot_w = 0.0f;
++                        for (int ci = 0; ci < C; ci++)
++                            dot_w += x_wh[ci] * Wdata[rel_h + r_w + ci * Wstride];
++
++                        const int k_idx = hk * W + wk;
++                        out[k_idx + (size_t)q_idx * HW + (size_t)b * HW * HW] = dot_h + dot_w;
++                    }
++                }
++            }
++        }
++    }
++}
++
++// learned-ops patch: fused add + leaky ReLU (HiFiGAN vocoder).
++//   dst = lrelu(a + b, slope)  in one pass, bit-identical to
++//   ggml_add followed by ggml_leaky_relu (same expression as
++//   ggml_vec_leaky_relu_f32, applied to the fused sum).
++//   a: [T, C] contiguous F32; b: [1, C] row-broadcast bias or [T, C]
++//   elementwise operand, contiguous F32.
++void ggml_compute_forward_add_leaky_relu(
++        const ggml_compute_params * params,
++        ggml_tensor * dst) {
++
++    const ggml_tensor * a = dst->src[0];   // [T, C]
++    const ggml_tensor * b = dst->src[1];   // [1, C] or [T, C]
++
++    GGML_ASSERT(a->type == GGML_TYPE_F32);
++    GGML_ASSERT(b->type == GGML_TYPE_F32);
++    GGML_ASSERT(dst->type == GGML_TYPE_F32);
++    GGML_ASSERT(ggml_is_contiguous(a));
++    GGML_ASSERT(ggml_is_contiguous(b));
++    GGML_ASSERT(ggml_is_contiguous(dst));
++    GGML_ASSERT(a->ne[2] == 1 && a->ne[3] == 1);
++    GGML_ASSERT(dst->ne[0] == a->ne[0] && dst->ne[1] == a->ne[1]);
++    GGML_ASSERT(a->ne[1] == b->ne[1]);
++    GGML_ASSERT(b->ne[0] == 1 || b->ne[0] == a->ne[0]);
++
++    const int64_t T = a->ne[0];
++    const int64_t C = a->ne[1];
++
++    float slope;
++    memcpy(&slope, dst->op_params, sizeof(float));
++
++    const int ith = params->ith;
++    const int nth = params->nth;
++
++    const float * a_data = (const float *) a->data;
++    const float * b_data = (const float *) b->data;
++          float * y_data = (float *)       dst->data;
++
++    const bool elementwise = b->ne[0] != 1;
++
++    if (C >= nth) {
++        // Fast path: stripe over channels.  The bias value stays in a
++        // register and the inner loop walks contiguous t for both inputs and
++        // the output (auto-vectorizable: two selects + mul + add).
++        for (int64_t c = ith; c < C; c += nth) {
++            const float * ap = a_data + c * T;
++            const float * bp = b_data + (elementwise ? c * T : c);
++                  float * yp = y_data + c * T;
++            if (elementwise) {
++                for (int64_t t = 0; t < T; ++t) {
++                    const float v = ap[t] + bp[t];
++                    yp[t] = (v > 0.f ? v : 0.f) + slope * (v < 0.f ? v : 0.f);
++                }
++            } else {
++                const float bv = bp[0];
++                for (int64_t t = 0; t < T; ++t) {
++                    const float v = ap[t] + bv;
++                    yp[t] = (v > 0.f ? v : 0.f) + slope * (v < 0.f ? v : 0.f);
++                }
++            }
++        }
++    } else {
++        // Few channels (e.g. C < n_threads): split the flattened element
++        // range instead, aligned to row boundaries so the broadcast bias
++        // index only changes between rows.
++        const int64_t total = C * T;
++        const int64_t per   = (total + nth - 1) / nth;
++        const int64_t start = (int64_t) ith * per;
++        const int64_t stop  = MIN(start + per, total);
++        int64_t c = start / T;
++        int64_t t = start - c * T;
++        for (int64_t i = start; i < stop; /* advanced below */) {
++            const int64_t chunk = MIN(stop - i, T - t);
++            const float * ap = a_data + c * T + t;
++            const float * bp = b_data + (elementwise ? c * T + t : c);
++                  float * yp = y_data + c * T + t;
++            if (elementwise) {
++                for (int64_t k = 0; k < chunk; ++k) {
++                    const float v = ap[k] + bp[k];
++                    yp[k] = (v > 0.f ? v : 0.f) + slope * (v < 0.f ? v : 0.f);
++                }
++            } else {
++                const float bv = bp[0];
++                for (int64_t k = 0; k < chunk; ++k) {
++                    const float v = ap[k] + bv;
++                    yp[k] = (v > 0.f ? v : 0.f) + slope * (v < 0.f ? v : 0.f);
++                }
++            }
++            i += chunk;
++            t += chunk;
++            if (t == T) { t = 0; ++c; }
++        }
++    }
++}
++
++// learned-ops patch: fused direct stride-1 1D convolution (HiFiGAN).
++//   out[t, oc] = sum_{ic, kw} w[kw, ic, oc] * x[t + kw*dil - pad, ic]
++//                (+ bias[oc]), then leaky ReLU(slope) when slope != 0.
++// No im2col buffer: the kernel is packed once per call into
++//   Wt[k = ic*K + kw][oc]  (row-major [IC*K, OCp], OCp = OC rounded up to 16)
++// by all threads in parallel (disjoint oc columns) followed by a threadpool
++// barrier, then each thread owns a balanced range of output t-blocks:
++//   for each oc-block (16 cols of Wt stay in L1/L2):
++//     for each 6-wide t-block in the thread's range: 6x16 AVX2 micro-kernel.
++// X rows of the thread's t-range stay L2-resident across the oc-block loop,
++// so X streams from RAM exactly once per call.  Edge tiles (conv boundary
++// clamp, partial t tail, partial oc tail) run a scalar path.
++// The epilogue applies bias + leaky with the exact stock expression
++// ((v > 0) ? v : 0) + slope * ((v < 0) ? v : 0) for bit-identical output.
++void ggml_compute_forward_conv_direct_1d(
++        const ggml_compute_params * params,
++        ggml_tensor * dst) {
++
++    const ggml_tensor * w    = dst->src[0];   // [K, IC, OC]
++    const ggml_tensor * x    = dst->src[1];   // [T, IC] contiguous
++    const ggml_tensor * bias = dst->src[2];   // [OC] or NULL
++
++    GGML_ASSERT(w->type == GGML_TYPE_F32);
++    GGML_ASSERT(x->type == GGML_TYPE_F32);
++    GGML_ASSERT(dst->type == GGML_TYPE_F32);
++    GGML_ASSERT(bias == NULL || bias->type == GGML_TYPE_F32);
++    GGML_ASSERT(ggml_is_contiguous(x));
++    GGML_ASSERT(ggml_is_contiguous(dst));
++
++    const int64_t K  = w->ne[0];
++    const int64_t IC = w->ne[1];
++    const int64_t OC = w->ne[2];
++    const int64_t T  = x->ne[0];
++    const int64_t OL = dst->ne[0];
++
++    const int pad = ggml_get_op_params_i32(dst, 0);
++    const int dil = ggml_get_op_params_i32(dst, 1);
++    float slope;
++    memcpy(&slope, (const char *) dst->op_params + 2 * sizeof(int32_t), sizeof(float));
++    const bool has_bias = ggml_get_op_params_i32(dst, 3) != 0;
++    float in_scale;
++    memcpy(&in_scale, (const char *) dst->op_params + 4 * sizeof(int32_t), sizeof(float));
++    float in_slope;
++    memcpy(&in_slope, (const char *) dst->op_params + 5 * sizeof(int32_t), sizeof(float));
++    const bool has_res = ggml_get_op_params_i32(dst, 6) != 0;
++    const bool has_act  = slope != 0.0f;
++    const bool has_in   = in_scale != 1.0f || in_slope != 0.0f;
++    const ggml_tensor * res = dst->src[3];   // [OL, OC] contiguous or NULL
++
++    const int ith = params->ith;
++    const int nth = params->nth;
++
++    const int64_t OCp = ((OC + 15) / 16) * 16;
++    const int64_t KP  = IC * K;
++    const int64_t L   = T + 2*pad;              // padded X row length
++
++    float * wdata = (float *) params->wdata;
++    float * Wt    = wdata;                      // [KP][OCp] packed kernel
++    float * bp    = wdata + KP * OCp;           // [OCp] bias, zero padded
++    float * Xp    = bp + OCp;                   // [IC][L] zero-padded X
++    GGML_ASSERT(params->wsize >= (size_t)(KP * OCp + OCp + IC * L) * sizeof(float));
++
++    const float * x_data = (const float *) x->data;
++    const float * w_data = (const float *) w->data;
++    const float * b_data = bias ? (const float *) bias->data : nullptr;
++    const float * r_data = has_res ? (const float *) res->data : nullptr;
++          float * o_data = (float *) dst->data;
++
++    // phase 1 (parallel, disjoint): pack W^T columns, bias, and the
++    // zero-padded X copy (removes all boundary clamping from phase 2)
++    {
++        const int64_t per = (OCp + nth - 1) / nth;
++        const int64_t c0  = std::min<int64_t>(ith * per, OCp);
++        const int64_t c1  = std::min<int64_t>(c0 + per, OCp);
++        for (int64_t oc = c0; oc < c1; ++oc) {
++            for (int64_t ic = 0; ic < IC; ++ic) {
++                for (int64_t kw = 0; kw < K; ++kw) {
++                    // w[kw, ic, oc] row-major: ((oc*IC) + ic)*K + kw
++                    const float v = (oc < OC)
++                        ? w_data[((oc * IC) + ic) * K + kw]
++                        : 0.0f;
++                    Wt[(ic * K + kw) * OCp + oc] = v;
++                }
++            }
++            bp[oc] = (oc < OC && b_data) ? b_data[oc] : 0.0f;
++        }
++    }
++    {
++        // X rows are large; split rows across threads instead.
++        // When has_in, the pad copy also folds the producer-side
++        // scale/leaky (bit-identical: leaky(x * s) elementwise, applied
++        // here once per element instead of in a separate pass).
++        const int64_t per_ic = (IC + nth - 1) / nth;
++        const int64_t ic0 = std::min<int64_t>(ith * per_ic, IC);
++        const int64_t ic1 = std::min<int64_t>(ic0 + per_ic, IC);
++        for (int64_t ic = ic0; ic < ic1; ++ic) {
++            float * row = Xp + ic * L;
++            memset(row, 0, pad * sizeof(float));
++            if (!has_in) {
++                memcpy(row + pad, x_data + ic * T, T * sizeof(float));
++            } else {
++                const float * src = x_data + ic * T;
++                float * dstv = row + pad;
++                for (int64_t t = 0; t < T; ++t) {
++                    float v = src[t];
++                    if (in_scale != 1.0f) v *= in_scale;
++                    if (in_slope != 0.0f) v = (v > 0.f ? v : 0.f) + in_slope * (v < 0.f ? v : 0.f);
++                    dstv[t] = v;
++                }
++            }
++            memset(row + pad + T, 0, (L - pad - T) * sizeof(float));
++        }
++    }
++
++    ggml_barrier(params->threadpool);
++
++    // phase 2: each thread owns a balanced range of 6-wide t-blocks.  Within
++    // the range, superblocks (oc-super x t-super) keep the X slice and the
++    // packed-W slice L2-resident: the t-super's X window is re-read from L2
++    // across the oc loop, the oc-super's Wt columns from L2/L3 across the t
++    // loop, so both X and Wt stream from RAM roughly once per call.
++    const int64_t TB  = 6;                      // micro-kernel t height
++    const int64_t n_tb = (OL + TB - 1) / TB;    // 6-wide t blocks
++    const int64_t n_ob = OCp / 16;              // 16-wide oc blocks
++
++    // superblock sizes: X slice <= ~64KB, Wt slice <= ~128KB
++    const int64_t TSB = std::max<int64_t>(1, std::min<int64_t>(32,
++            (int64_t)(65536 / (TB * IC * 4 + 1))));
++    const int64_t OSB = std::max<int64_t>(1, std::min<int64_t>(n_ob,
++            (int64_t)(131072 / (16 * KP * 4 + 1))));
++
++    const int64_t per_t = (n_tb + nth - 1) / nth;
++    const int64_t tb0   = std::min<int64_t>(ith * per_t, n_tb);
++    const int64_t tb1   = std::min<int64_t>(tb0 + per_t, n_tb);
++
++#if defined(__AVX2__)
++    for (int64_t ts = tb0; ts < tb1; ts += TSB) {
++        const int64_t te = std::min<int64_t>(ts + TSB, tb1);
++        for (int64_t ob = 0; ob < n_ob; ob += OSB) {
++            const int64_t oe = std::min<int64_t>(ob + OSB, n_ob);
++            for (int64_t ob2 = ob; ob2 < oe; ++ob2) {
++                const int64_t oc0 = ob2 * 16;
++                const float * Wb  = Wt + oc0;   // Wt[k*OCp + oc0 .. +15]
++                for (int64_t tb = ts; tb < te; ++tb) {
++                    const int64_t t0 = tb * TB;
++                    if (t0 + TB > OL) {
++                        // partial tail block (at most one per call): scalar
++                        for (int64_t t = t0; t < OL; ++t) {
++                            for (int64_t oc = oc0; oc < std::min<int64_t>(oc0 + 16, OC); ++oc) {
++                                float acc = has_bias ? bp[oc] : 0.0f;
++                                for (int64_t ic = 0; ic < IC; ++ic) {
++                                    const float * xr = Xp + ic * L + t0;
++                                    for (int64_t kw = 0; kw < K; ++kw) {
++                                        acc += Wt[(ic * K + kw) * OCp + oc] * xr[t - t0 + kw * dil];
++                                    }
++                                }
++                                if (has_res) acc = acc + r_data[oc * OL + t];
++                                if (has_act) acc = (acc > 0.f ? acc : 0.f) + slope * (acc < 0.f ? acc : 0.f);
++                                o_data[oc * OL + t] = acc;
++                            }
++                        }
++                        continue;
++                    }
++                    __m256 a00 = _mm256_setzero_ps(), a01 = _mm256_setzero_ps();
++                    __m256 a10 = _mm256_setzero_ps(), a11 = _mm256_setzero_ps();
++                    __m256 a20 = _mm256_setzero_ps(), a21 = _mm256_setzero_ps();
++                    __m256 a30 = _mm256_setzero_ps(), a31 = _mm256_setzero_ps();
++                    __m256 a40 = _mm256_setzero_ps(), a41 = _mm256_setzero_ps();
++                    __m256 a50 = _mm256_setzero_ps(), a51 = _mm256_setzero_ps();
++                    for (int64_t ic = 0; ic < IC; ++ic) {
++                        // pointer-increment addressing: the per-kw address
++                        // chains are 1-cycle adds (imul-on-counter chains were
++                        // measured to gate broadcast dispatch and cost ~26%)
++                        const float * xp = Xp + ic * L + t0;
++                        const float * wp = Wb + ic * K * OCp;
++                        for (int kw = 0; kw < K; ++kw, xp += dil, wp += OCp) {
++                            const __m256 w0 = _mm256_load_ps(wp);
++                            const __m256 w1 = _mm256_load_ps(wp + 8);
++                            a00 = _mm256_fmadd_ps(_mm256_broadcast_ss(xp + 0), w0, a00);
++                            a01 = _mm256_fmadd_ps(_mm256_broadcast_ss(xp + 0), w1, a01);
++                            a10 = _mm256_fmadd_ps(_mm256_broadcast_ss(xp + 1), w0, a10);
++                            a11 = _mm256_fmadd_ps(_mm256_broadcast_ss(xp + 1), w1, a11);
++                            a20 = _mm256_fmadd_ps(_mm256_broadcast_ss(xp + 2), w0, a20);
++                            a21 = _mm256_fmadd_ps(_mm256_broadcast_ss(xp + 2), w1, a21);
++                            a30 = _mm256_fmadd_ps(_mm256_broadcast_ss(xp + 3), w0, a30);
++                            a31 = _mm256_fmadd_ps(_mm256_broadcast_ss(xp + 3), w1, a31);
++                            a40 = _mm256_fmadd_ps(_mm256_broadcast_ss(xp + 4), w0, a40);
++                            a41 = _mm256_fmadd_ps(_mm256_broadcast_ss(xp + 4), w1, a41);
++                            a50 = _mm256_fmadd_ps(_mm256_broadcast_ss(xp + 5), w0, a50);
++                            a51 = _mm256_fmadd_ps(_mm256_broadcast_ss(xp + 5), w1, a51);
++                        }
++                    }
++                    // epilogue: bias + optional leaky; stores are t-contiguous
++                    // per oc (extraction cost is negligible vs KP FMAs/tile)
++                    {
++                        float tmp[TB][8];
++                        for (int64_t j = 0; j < 16; ++j) {
++                            const int64_t oc = oc0 + j;
++                            if (oc >= OC) break;
++                            const int hi = j >= 8 ? 1 : 0;
++                            const int ch = (int)(j & 7);
++                            const float bv = has_bias ? bp[oc] : 0.0f;
++                            _mm256_storeu_ps(&tmp[0][0], hi ? a01 : a00);
++                            _mm256_storeu_ps(&tmp[1][0], hi ? a11 : a10);
++                            _mm256_storeu_ps(&tmp[2][0], hi ? a21 : a20);
++                            _mm256_storeu_ps(&tmp[3][0], hi ? a31 : a30);
++                            _mm256_storeu_ps(&tmp[4][0], hi ? a41 : a40);
++                            _mm256_storeu_ps(&tmp[5][0], hi ? a51 : a50);
++                            for (int64_t i = 0; i < TB; ++i) {
++                                float v = bv + tmp[i][ch];
++                                if (has_res) v = v + r_data[oc * OL + t0 + i];
++                                if (has_act) v = (v > 0.f ? v : 0.f) + slope * (v < 0.f ? v : 0.f);
++                                o_data[oc * OL + t0 + i] = v;
++                            }
++                        }
++                    }
++                }
++            }
++        }
++    }
++#else
++    // scalar fallback (no AVX2): same math, per-element
++    for (int64_t tb = tb0; tb < tb1; ++tb) {
++        const int64_t t0 = tb * TB;
++        for (int64_t t = t0; t < std::min<int64_t>(t0 + TB, OL); ++t) {
++            for (int64_t oc = 0; oc < OC; ++oc) {
++                float acc = has_bias ? bp[oc] : 0.0f;
++                for (int64_t ic = 0; ic < IC; ++ic) {
++                    const float * xr = Xp + ic * L + t0;
++                    for (int64_t kw = 0; kw < K; ++kw) {
++                        acc += Wt[(ic * K + kw) * OCp + oc] * xr[t - t0 + kw * dil];
++                    }
++                }
++                if (has_res) acc = acc + r_data[oc * OL + t];
++                if (has_act) acc = (acc > 0.f ? acc : 0.f) + slope * (acc < 0.f ? acc : 0.f);
++                o_data[oc * OL + t] = acc;
++            }
++        }
++    }
++#endif
++}
++
+ // ggml_compute_forward_rwkv_wkv6
+ 
+ static void ggml_compute_forward_rwkv_wkv6_f32(
+diff --git a/src/ggml-cpu/ops.h b/src/ggml-cpu/ops.h
+index 4c1642a..07f830b 100644
+--- a/src/ggml-cpu/ops.h
++++ b/src/ggml-cpu/ops.h
+@@ -66,6 +66,7 @@ void ggml_compute_forward_rope_back(const struct ggml_compute_params * params, s
+ void ggml_compute_forward_clamp(const struct ggml_compute_params * params, struct ggml_tensor * dst);
+ void ggml_compute_forward_conv_transpose_1d(const struct ggml_compute_params * params, struct ggml_tensor * dst);
+ void ggml_compute_forward_im2col(const struct ggml_compute_params * params, struct ggml_tensor * dst);
++void ggml_compute_forward_im2col_fast_1d(const struct ggml_compute_params * params, struct ggml_tensor * dst);
+ void ggml_compute_forward_im2col_back_f32(const struct ggml_compute_params * params, struct ggml_tensor * dst);
+ void ggml_compute_forward_im2col_3d(const struct ggml_compute_params * params, struct ggml_tensor * dst);
+ void ggml_compute_forward_col2im_1d(const struct ggml_compute_params * params, struct ggml_tensor * dst);
+@@ -76,6 +77,8 @@ void ggml_compute_forward_conv_2d_dw(const struct ggml_compute_params * params,
+ void ggml_compute_forward_pool_1d(const struct ggml_compute_params * params, struct ggml_tensor * dst);
+ void ggml_compute_forward_pool_2d(const struct ggml_compute_params * params, struct ggml_tensor * dst);
+ void ggml_compute_forward_pool_2d_back(const struct ggml_compute_params * params, struct ggml_tensor * dst);
++void ggml_compute_forward_scatter_elements(const struct ggml_compute_params * params, struct ggml_tensor * dst);
++void ggml_compute_forward_rel_pos_bias(const struct ggml_compute_params * params, struct ggml_tensor * dst);
+ void ggml_compute_forward_upscale(const struct ggml_compute_params * params, struct ggml_tensor * dst);
+ void ggml_compute_forward_pad(const struct ggml_compute_params * params, struct ggml_tensor * dst);
+ void ggml_compute_forward_pad_reflect_1d(const struct ggml_compute_params * params, struct ggml_tensor * dst);
+@@ -119,6 +122,9 @@ void ggml_compute_forward_opt_step_adamw(const struct ggml_compute_params * para
+ void ggml_compute_forward_mul_mat(const struct ggml_compute_params * params, struct ggml_tensor * dst);
+ void ggml_compute_forward_fwht(const struct ggml_compute_params * params, struct ggml_tensor * dst);
+ void ggml_compute_forward_opt_step_sgd(const struct ggml_compute_params * params, struct ggml_tensor * dst);
++// learned-ops patch (HiFiGAN vocoder fusion)
++void ggml_compute_forward_add_leaky_relu(const struct ggml_compute_params * params, struct ggml_tensor * dst);
++void ggml_compute_forward_conv_direct_1d(const struct ggml_compute_params * params, struct ggml_tensor * dst);
+ #ifdef __cplusplus
+ }
+ #endif
+diff --git a/src/ggml-cuda/conv-transpose-1d.cu b/src/ggml-cuda/conv-transpose-1d.cu
+index ebf2aa8..d319974 100644
+--- a/src/ggml-cuda/conv-transpose-1d.cu
++++ b/src/ggml-cuda/conv-transpose-1d.cu
+@@ -2,6 +2,7 @@
+ 
+ static  __global__ void conv_transpose_1d_kernel(
+         const int s0, const int p0, const int d0, const int output_size,
++        const int cout_pg, const int cin_g,
+         const int src0_ne0, const int src0_ne1, const int src0_ne2, const int src0_ne3,
+         const int src1_ne0, const int src1_ne1, const int src1_ne2, const int src1_ne3,
+         const int dst_ne0, const int dst_ne1, const int dst_ne2, const int dst_ne3,
+@@ -17,9 +18,17 @@ static  __global__ void conv_transpose_1d_kernel(
+ 
+     float accumulator = 0;
+ 
+-    for (int c = 0; c < src0_ne2; c++) {
+-        int kernel_offset = src0_ne0 * (out_ch + src0_ne1 * c);
+-        int input_offset = src1_ne0 * (c + src1_ne1 * plane);
++    // grouped transpose conv (PyTorch layout): src0 is [K, Cout_pg, Cin_g]
++    // with Cout_pg = dst_ne1 / groups and Cin_g = src1_ne1 / groups. Output
++    // channel out_ch selects the group and the per-group weight block; the
++    // input channels are offset by group * Cin_g. For groups == 1
++    // (cout_pg == dst_ne1, cin_g == src1_ne1) this reduces to the plain
++    // un-grouped kernel.
++    for (int c = 0; c < cin_g; c++) {
++        const int out_pg = out_ch % cout_pg;
++        const int c_in   = (out_ch / cout_pg) * cin_g + c;
++        int kernel_offset = src0_ne0 * (out_pg + src0_ne1 * c);
++        int input_offset = src1_ne0 * (c_in + src1_ne1 * plane);
+ 
+         for (int k = 0; k < src0_ne0; k++) {
+             int input_numer = out_t + p0 - k*d0;
+@@ -41,6 +50,7 @@ static  __global__ void conv_transpose_1d_kernel(
+ 
+ static void conv_transpose_1d_f32_f32_cuda(
+         const int s0, const int p0, const int d0, const int output_size,
++        const int cout_pg, const int cin_g,
+         const int src0_ne0, const int src0_ne1, const int src0_ne2, const int src0_ne3,
+         const int src1_ne0, const int src1_ne1, const int src1_ne2, const int src1_ne3,
+         const int dst_ne0, const int dst_ne1, const int dst_ne2, const int dst_ne3,
+@@ -50,6 +60,7 @@ static void conv_transpose_1d_f32_f32_cuda(
+     const int num_blocks = (output_size + CUDA_CONV_TRANPOSE_1D_BLOCK_SIZE - 1) / CUDA_CONV_TRANPOSE_1D_BLOCK_SIZE;
+     conv_transpose_1d_kernel<<<num_blocks,CUDA_CONV_TRANPOSE_1D_BLOCK_SIZE, 0, stream>>>(
+         s0,p0,d0,output_size,
++        cout_pg, cin_g,
+         src0_ne0, src0_ne1,  src0_ne2, src0_ne3,
+         src1_ne0, src1_ne1,  src1_ne2, src1_ne3,
+         dst_ne0,  dst_ne1,   dst_ne2,  dst_ne3,
+@@ -75,12 +86,20 @@ void ggml_cuda_op_conv_transpose_1d(ggml_backend_cuda_context & ctx, ggml_tensor
+     const int32_t * opts = (const int32_t *)dst->op_params;
+ 
+     const int s0 = opts[0];
+-    const int p0 = 0;//opts[3];
+-    const int d0 = 1;//opts[4];
++    const int p0 = opts[1];
++    const int d0 = opts[2];
++    const int g0 = opts[3];
++
++    GGML_ASSERT(dst->ne[1] % g0 == 0);
++    GGML_ASSERT(src1->ne[1] % g0 == 0);
++
++    const int cout_pg = dst->ne[1] / g0;
++    const int cin_g   = src1->ne[1] / g0;
+ 
+     const int64_t output_size = ggml_nelements(dst);
+ 
+     conv_transpose_1d_f32_f32_cuda(s0, p0, d0, output_size,
++        cout_pg, cin_g,
+         src0->ne[0], src0->ne[1], src0->ne[2], src0->ne[3],
+         src1->ne[0], src1->ne[1], src1->ne[2], src1->ne[3],
+         dst->ne[0], dst->ne[1], dst->ne[2], dst->ne[3],
+diff --git a/src/ggml-cuda/ggml-cuda.cu b/src/ggml-cuda/ggml-cuda.cu
+index 5446b31..f1c902f 100644
+--- a/src/ggml-cuda/ggml-cuda.cu
++++ b/src/ggml-cuda/ggml-cuda.cu
+@@ -2269,6 +2269,7 @@ static bool ggml_cuda_compute_forward(ggml_backend_cuda_context & ctx, struct gg
+             ggml_cuda_op_roll(ctx, dst);
+             break;
+         case GGML_OP_IM2COL:
++        case GGML_OP_IM2COL_FAST_1D:
+             ggml_cuda_op_im2col(ctx, dst);
+             break;
+         case GGML_OP_IM2COL_3D:
+@@ -5107,6 +5108,7 @@ static bool ggml_backend_cuda_device_supports_op(ggml_backend_dev_t dev, const g
+             return op->src[0]->nb[0] == ggml_type_size(op->src[0]->type) && ggml_is_contiguous_2(op->src[0]);
+         }
+         case GGML_OP_IM2COL:
++        case GGML_OP_IM2COL_FAST_1D:
+         case GGML_OP_IM2COL_3D:
+         case GGML_OP_CONV_2D:
+             return (ggml_is_contiguous(op->src[0]) && ggml_is_contiguous(op->src[1]));
+diff --git a/src/ggml-metal/ggml-metal-device.cpp b/src/ggml-metal/ggml-metal-device.cpp
+index c153bd8..92c246c 100644
+--- a/src/ggml-metal/ggml-metal-device.cpp
++++ b/src/ggml-metal/ggml-metal-device.cpp
+@@ -1811,7 +1811,7 @@ ggml_metal_pipeline_with_params ggml_metal_library_get_pipeline_rope(ggml_metal_
+ }
+ 
+ ggml_metal_pipeline_with_params ggml_metal_library_get_pipeline_im2col(ggml_metal_library_t lib, const ggml_tensor * op) {
+-    assert(op->op == GGML_OP_IM2COL);
++    assert(op->op == GGML_OP_IM2COL || op->op == GGML_OP_IM2COL_FAST_1D);
+ 
+     GGML_TENSOR_LOCALS(int64_t, ne0, op->src[0], ne);
+ 
+diff --git a/src/ggml-metal/ggml-metal-device.m b/src/ggml-metal/ggml-metal-device.m
+index 2dc6eb8..dcf83e8 100644
+--- a/src/ggml-metal/ggml-metal-device.m
++++ b/src/ggml-metal/ggml-metal-device.m
+@@ -1195,7 +1195,9 @@ bool ggml_metal_device_supports_op(ggml_metal_device_t dev, const struct ggml_te
+             return ggml_is_contiguous_rows(op->src[0]) && ggml_is_contiguous_rows(op->src[1]) && op->src[0]->type == GGML_TYPE_F32;
+         case GGML_OP_REPEAT:
+         case GGML_OP_CONV_TRANSPOSE_1D:
+-            return true;
++            // learned-ops patch: the metal kernel supports neither padding
++            // (p0) nor groups (g0); fall back to the CPU for those shapes.
++            return ggml_get_op_params_i32(op, 1) == 0 && ggml_get_op_params_i32(op, 3) == 1;
+         case GGML_OP_CONV_TRANSPOSE_2D:
+             return ggml_is_contiguous(op->src[0]) && ggml_is_contiguous(op->src[1]) &&
+                 (op->src[0]->type == GGML_TYPE_F16 || op->src[0]->type == GGML_TYPE_F32) &&
+diff --git a/src/ggml-metal/ggml-metal-ops.cpp b/src/ggml-metal/ggml-metal-ops.cpp
+index c5d7619..62af619 100644
+--- a/src/ggml-metal/ggml-metal-ops.cpp
++++ b/src/ggml-metal/ggml-metal-ops.cpp
+@@ -394,6 +394,7 @@ static int ggml_metal_op_encode_impl(ggml_metal_op_t ctx, int idx) {
+                 n_fuse = ggml_metal_op_rope(ctx, idx);
+             } break;
+         case GGML_OP_IM2COL:
++        case GGML_OP_IM2COL_FAST_1D:
+             {
+                 n_fuse = ggml_metal_op_im2col(ctx, idx);
+             } break;
+diff --git a/src/ggml-vulkan/ggml-vulkan.cpp b/src/ggml-vulkan/ggml-vulkan.cpp
+index a923755..70b1a45 100644
+--- a/src/ggml-vulkan/ggml-vulkan.cpp
++++ b/src/ggml-vulkan/ggml-vulkan.cpp
+@@ -818,6 +818,9 @@ struct vk_device_struct {
+     bool shader_int64;
+     bool buffer_device_address;
+     bool vulkan_memory_model;
++    // learned-ops patch: shaderBufferFloat32AtomicAdd from VK_EXT_shader_atomic_float,
++    // required by GGML_OP_SCATTER_ELEMENTS with reduction == 1 (learned from ggmlR)
++    bool shader_atomic_float_add;
+ 
+     bool add_rms_fusion;
+     uint32_t partials_binding_alignment;
+@@ -1054,6 +1057,10 @@ struct vk_device_struct {
+     vk_pipeline pipeline_col2im_1d_f32;
+     vk_pipeline pipeline_col2im_1d_f16;
+     vk_pipeline pipeline_col2im_1d_bf16;
++    // learned-ops patch (from ggmlR)
++    vk_pipeline pipeline_rel_pos_bias_f32;
++    vk_pipeline pipeline_scatter_elements_none;
++    vk_pipeline pipeline_scatter_elements_add;
+     vk_pipeline pipeline_out_prod_f32;
+     vk_pipeline pipeline_snake_f32;
+     vk_pipeline pipeline_snake_f16;
+@@ -1795,6 +1802,16 @@ struct vk_op_conv_transpose_1d_push_constants {
+     int32_t s0;
+ };
+ 
++// learned-ops patch (from ggmlR): must match rel_pos_bias.comp
++struct vk_op_rel_pos_bias_push_constants {
++    uint32_t H;
++    uint32_t W;
++    uint32_t B;
++    uint32_t C;
++    uint32_t rel_h;   /* 2*H-1 */
++    uint32_t rel_w;   /* 2*W-1 */
++};
++
+ struct vk_op_snake_push_constants {
+     uint32_t ne0;
+     uint32_t ne1;
+@@ -5784,6 +5801,14 @@ static void ggml_vk_load_shaders(vk_device& device, vk_pipeline requested) {
+     ggml_vk_create_pipeline(device, device->pipeline_timestep_embedding_f32, "timestep_embedding_f32", timestep_embedding_f32_len, timestep_embedding_f32_data, "main", 2, sizeof(vk_op_timestep_embedding_push_constants), {256, 1, 1}, {}, 1);
+ 
+     ggml_vk_create_pipeline(device, device->pipeline_conv_transpose_1d_f32, "conv_transpose_1d_f32", conv_transpose_1d_f32_len, conv_transpose_1d_f32_data, "main", 3, sizeof(vk_op_conv_transpose_1d_push_constants), {1, 1, 1}, {}, 1);
++
++    // learned-ops patch (from ggmlR)
++    ggml_vk_create_pipeline(device, device->pipeline_rel_pos_bias_f32, "rel_pos_bias_f32", rel_pos_bias_f32_len, rel_pos_bias_f32_data, "main", 3, sizeof(vk_op_rel_pos_bias_push_constants), {8, 8, 4}, {}, 1, true);
++    ggml_vk_create_pipeline(device, device->pipeline_scatter_elements_none, "scatter_elements_none", scatter_elements_none_len, scatter_elements_none_data, "main", 3, sizeof(vk_op_binary_push_constants), {256, 1, 1}, {}, 1, true);
++    if (device->shader_atomic_float_add) {
++        ggml_vk_create_pipeline(device, device->pipeline_scatter_elements_add, "scatter_elements_add", scatter_elements_add_len, scatter_elements_add_data, "main", 3, sizeof(vk_op_binary_push_constants), {256, 1, 1}, {}, 1, true);
++    }
++
+     ggml_vk_create_pipeline(device, device->pipeline_col2im_1d_f32,  "col2im_1d_f32",  col2im_1d_f32_len,  col2im_1d_f32_data,  "main", 2, sizeof(vk_op_col2im_1d_push_constants), {256, 1, 1}, {}, 1, true);
+     ggml_vk_create_pipeline(device, device->pipeline_col2im_1d_f16,  "col2im_1d_f16",  col2im_1d_f16_len,  col2im_1d_f16_data,  "main", 2, sizeof(vk_op_col2im_1d_push_constants), {256, 1, 1}, {}, 1, true);
+     ggml_vk_create_pipeline(device, device->pipeline_col2im_1d_bf16, "col2im_1d_bf16", col2im_1d_bf16_len, col2im_1d_bf16_data, "main", 2, sizeof(vk_op_col2im_1d_push_constants), {256, 1, 1}, {}, 1, true);
+@@ -6179,6 +6204,7 @@ static vk_device ggml_vk_get_device(size_t idx) {
+         bool dot2_f16_support = false;
+         bool ocp_microscaling_extension = false;
+         bool shader_float8_extension = false;
++        bool shader_atomic_float_extension = false;
+ 
+         for (const auto& properties : ext_props) {
+             if (strcmp("VK_KHR_maintenance4", properties.extensionName) == 0) {
+@@ -6247,6 +6273,8 @@ static vk_device ggml_vk_get_device(size_t idx) {
+                 internally_sync_support = true;
+             } else if (strcmp("VK_EXT_device_fault", properties.extensionName) == 0) {
+                 device->device_fault = true;
++            } else if (strcmp("VK_EXT_shader_atomic_float", properties.extensionName) == 0) {
++                shader_atomic_float_extension = true;
+             }
+         }
+ 
+@@ -6555,6 +6583,17 @@ static vk_device ggml_vk_get_device(size_t idx) {
+             device_extensions.push_back(VK_EXT_SHADER_FLOAT8_EXTENSION_NAME);
+         }
+ 
++        // learned-ops patch: float atomics for GGML_OP_SCATTER_ELEMENTS reduction=1
++#if defined(VK_EXT_SHADER_ATOMIC_FLOAT_EXTENSION_NAME)
++        VkPhysicalDeviceShaderAtomicFloatFeaturesEXT shader_atomic_float_features {};
++        shader_atomic_float_features.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SHADER_ATOMIC_FLOAT_FEATURES_EXT;
++        if (shader_atomic_float_extension) {
++            last_struct->pNext = (VkBaseOutStructure *)&shader_atomic_float_features;
++            last_struct = (VkBaseOutStructure *)&shader_atomic_float_features;
++            device_extensions.push_back("VK_EXT_shader_atomic_float");
++        }
++#endif
++
+         VkPhysicalDeviceMaintenance4Features maint4_features {};
+         maint4_features.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_MAINTENANCE_4_FEATURES;
+         if (maintenance4_support) {
+@@ -6655,6 +6694,14 @@ static vk_device ggml_vk_get_device(size_t idx) {
+         device->buffer_device_address = vk12_features.bufferDeviceAddress;
+         device->vulkan_memory_model = vk12_features.vulkanMemoryModel;
+ 
++        // learned-ops patch: float atomics for GGML_OP_SCATTER_ELEMENTS reduction=1
++#if defined(VK_EXT_SHADER_ATOMIC_FLOAT_EXTENSION_NAME)
++        device->shader_atomic_float_add = shader_atomic_float_extension &&
++                                          shader_atomic_float_features.shaderBufferFloat32AtomicAdd;
++#else
++        device->shader_atomic_float_add = false;
++#endif
++
+         if (device->subgroup_size_control) {
+             device->subgroup_min_size = subgroup_size_control_props.minSubgroupSize;
+             device->subgroup_max_size = subgroup_size_control_props.maxSubgroupSize;
+@@ -11497,6 +11544,7 @@ static vk_pipeline ggml_vk_op_get_pipeline(ggml_backend_vk_context * ctx, const
+         }
+         return nullptr;
+     case GGML_OP_IM2COL:
++    case GGML_OP_IM2COL_FAST_1D:
+         if (src1->type == GGML_TYPE_F32 && dst->type == GGML_TYPE_F32) {
+             return ctx->device->pipeline_im2col_f32;
+         }
+@@ -11522,6 +11570,17 @@ static vk_pipeline ggml_vk_op_get_pipeline(ggml_backend_vk_context * ctx, const
+             return ctx->device->pipeline_conv_transpose_1d_f32;
+         }
+         return nullptr;
++    case GGML_OP_REL_POS_BIAS:
++        if (src0->type == GGML_TYPE_F32 && src1->type == GGML_TYPE_F32 && dst->type == GGML_TYPE_F32) {
++            return ctx->device->pipeline_rel_pos_bias_f32;
++        }
++        return nullptr;
++    case GGML_OP_SCATTER_ELEMENTS:
++        {
++            const int32_t reduction = ((const int32_t *)dst->op_params)[0];
++            return reduction == 1 ? ctx->device->pipeline_scatter_elements_add
++                                  : ctx->device->pipeline_scatter_elements_none;
++        }
+     case GGML_OP_COL2IM_1D:
+         switch (src0->type) {
+             case GGML_TYPE_F32:  return ctx->device->pipeline_col2im_1d_f32;
+@@ -12004,6 +12063,7 @@ static void ggml_vk_op_f32(ggml_backend_vk_context * ctx, vk_context& subctx, co
+         GGML_ASSERT(0);
+         break;
+     case GGML_OP_IM2COL:
++    case GGML_OP_IM2COL_FAST_1D:
+         {
+             const bool is_2D = dst->op_params[6] == 1;
+ 
+@@ -12055,7 +12115,9 @@ static void ggml_vk_op_f32(ggml_backend_vk_context * ctx, vk_context& subctx, co
+         } break;
+     case GGML_OP_CONV_TRANSPOSE_1D:
+         {
+-            elements = {uint32_t(src0->ne[1]), 1, 1}; // parallelize in {Cout, 1, 1}
++            // parallelize in {Cout_total, 1, 1}; with groups, src0->ne[1] is
++            // only the per-group channel count, so use dst->ne[1]
++            elements = {uint32_t(dst->ne[1]), 1, 1};
+         } break;
+     case GGML_OP_COL2IM_1D:
+         {
+@@ -12205,6 +12267,14 @@ static void ggml_vk_op_f32(ggml_backend_vk_context * ctx, vk_context& subctx, co
+             elements = { nr, n_t, n_s };
+         }
+         break;
++    case GGML_OP_REL_POS_BIAS:
++        {
++            // dispatch over output positions (x=wk, y=hk, z=b*HW+q_idx); local_size 8x8x4
++            const uint32_t H = ((const uint32_t *)dst->op_params)[0];
++            const uint32_t W = ((const uint32_t *)dst->op_params)[1];
++            const uint32_t B = ((const uint32_t *)dst->op_params)[2];
++            elements = { W, H, B * H * W };
++        } break;
+     default:
+         elements = { (uint32_t)ggml_nelements(src0), 1, 1 };
+         break;
+@@ -12231,7 +12301,7 @@ static void ggml_vk_op_f32(ggml_backend_vk_context * ctx, vk_context& subctx, co
+         vk_subbuffer subbuf2 = use_src2 ? src2_buf : src0_buf;
+         vk_subbuffer subbuf3 = use_src3 ? src3_buf : src0_buf;
+         ggml_vk_dispatch_pipeline(ctx, subctx, pipeline, { src0_buf, src1_buf, subbuf2, dst_buf, subbuf3 }, pc, elements);
+-    } else if (op == GGML_OP_IM2COL || op == GGML_OP_IM2COL_3D) {
++    } else if (op == GGML_OP_IM2COL || op == GGML_OP_IM2COL_3D || op == GGML_OP_IM2COL_FAST_1D) {
+         if (ctx->device->shader_int64 && ctx->device->buffer_device_address) {
+             // buffer device address path doesn't use dst buffer
+             dst_buf.size = 1;
+@@ -13969,6 +14039,76 @@ static void ggml_vk_conv_transpose_1d(ggml_backend_vk_context * ctx, vk_context&
+     ggml_vk_op_f32(ctx, subctx, src0, src1, nullptr, nullptr, dst, GGML_OP_CONV_TRANSPOSE_1D, std::move(p));
+ }
+ 
++// learned-ops patch (from ggmlR)
++
++static void ggml_vk_rel_pos_bias(ggml_backend_vk_context * ctx, vk_context& subctx, const ggml_tensor * src0, const ggml_tensor * src1, ggml_tensor * dst) {
++    GGML_ASSERT(src0->type == GGML_TYPE_F32);
++    GGML_ASSERT(src1->type == GGML_TYPE_F32);
++    GGML_ASSERT( dst->type == GGML_TYPE_F32);
++
++    const int32_t H     = ((const int32_t *)dst->op_params)[0];
++    const int32_t W     = ((const int32_t *)dst->op_params)[1];
++    const int32_t B     = ((const int32_t *)dst->op_params)[2];
++    const int32_t C     = ((const int32_t *)dst->op_params)[3];
++    const int32_t rel_h = ((const int32_t *)dst->op_params)[4];
++    const int32_t rel_w = 2*W - 1;
++
++    vk_op_rel_pos_bias_push_constants pc{
++        static_cast<uint32_t>(H),
++        static_cast<uint32_t>(W),
++        static_cast<uint32_t>(B),
++        static_cast<uint32_t>(C),
++        static_cast<uint32_t>(rel_h),
++        static_cast<uint32_t>(rel_w),
++    };
++
++    ggml_vk_op_f32<vk_op_rel_pos_bias_push_constants>(ctx, subctx, src0, src1, nullptr, nullptr, dst, GGML_OP_REL_POS_BIAS, std::move(pc));
++}
++
++static void ggml_vk_scatter_elements(ggml_backend_vk_context * ctx, vk_context& subctx, ggml_tensor * dst) {
++    const ggml_tensor * data    = dst->src[0];
++    const ggml_tensor * updates = dst->src[1];
++    const ggml_tensor * indices = dst->src[2];
++
++    GGML_ASSERT(data->type    == GGML_TYPE_F32);
++    GGML_ASSERT(updates->type == GGML_TYPE_F32);
++    GGML_ASSERT(indices->type == GGML_TYPE_I32);
++    GGML_ASSERT( dst->type == GGML_TYPE_F32);
++
++    /* Step 1: copy data → dst buffer */
++    {
++        vk_subbuffer src_sb = ggml_vk_tensor_subbuffer(ctx, data, true);
++        vk_subbuffer dst_sb = ggml_vk_tensor_subbuffer(ctx, dst, true);
++        ggml_vk_buffer_copy_async(subctx, dst_sb.buffer, dst_sb.offset,
++                                           src_sb.buffer, src_sb.offset,
++                                           ggml_nbytes(data));
++        /* Barrier: copy must finish before the scatter shader reads/writes dst.
++         * NB: use braced init - vk::MemoryBarrier collides with the winnt.h macro. */
++        subctx->s->buffer->buf.pipelineBarrier(
++            vk::PipelineStageFlagBits::eTransfer,
++            vk::PipelineStageFlagBits::eComputeShader,
++            {},
++            { { vk::AccessFlagBits::eTransferWrite,
++                vk::AccessFlagBits::eShaderRead | vk::AccessFlagBits::eShaderWrite } },
++            {}, {});
++    }
++
++    /* Step 2: run scatter shader — updates as src0, indices as src1 */
++    const uint32_t upd_type_size = ggml_type_size(updates->type);
++    const uint32_t idx_type_size = ggml_type_size(indices->type);
++    const uint32_t dst_type_size = ggml_type_size(dst->type);
++
++    ggml_vk_op_f32<vk_op_binary_push_constants>(ctx, subctx, updates, indices, nullptr, nullptr, dst, GGML_OP_SCATTER_ELEMENTS, {
++        (uint32_t)ggml_nelements(updates),
++        (uint32_t)updates->ne[0], (uint32_t)updates->ne[1], (uint32_t)updates->ne[2], (uint32_t)updates->ne[3],
++        (uint32_t)(updates->nb[0] / upd_type_size), (uint32_t)(updates->nb[1] / upd_type_size), (uint32_t)(updates->nb[2] / upd_type_size), (uint32_t)(updates->nb[3] / upd_type_size),
++        (uint32_t)indices->ne[0], (uint32_t)indices->ne[1], (uint32_t)indices->ne[2], (uint32_t)indices->ne[3],
++        (uint32_t)(indices->nb[0] / idx_type_size), (uint32_t)(indices->nb[1] / idx_type_size), (uint32_t)(indices->nb[2] / idx_type_size), (uint32_t)(indices->nb[3] / idx_type_size),
++        (uint32_t)dst->ne[0], (uint32_t)dst->ne[1], (uint32_t)dst->ne[2], (uint32_t)dst->ne[3],
++        (uint32_t)(dst->nb[0] / dst_type_size), (uint32_t)(dst->nb[1] / dst_type_size), (uint32_t)(dst->nb[2] / dst_type_size), (uint32_t)(dst->nb[3] / dst_type_size),
++        0, 0.0f, 0.0f, ((const int32_t *)dst->op_params)[1] });
++}
++
+ static void ggml_vk_col2im_1d(ggml_backend_vk_context * ctx, vk_context& subctx, const ggml_tensor * src0, ggml_tensor * dst) {
+     // src0: [K_OC, T_in] columns from matmul
+     // dst:  [T_out, OC]
+@@ -15550,6 +15690,7 @@ static bool ggml_vk_build_graph(ggml_backend_vk_context * ctx, ggml_cgraph * cgr
+ 
+         break;
+     case GGML_OP_IM2COL:
++    case GGML_OP_IM2COL_FAST_1D:
+         ggml_vk_im2col(ctx, compute_ctx, src0, src1, node);
+ 
+         break;
+@@ -15568,6 +15709,14 @@ static bool ggml_vk_build_graph(ggml_backend_vk_context * ctx, ggml_cgraph * cgr
+     case GGML_OP_CONV_TRANSPOSE_1D:
+         ggml_vk_conv_transpose_1d(ctx, compute_ctx, src0, src1, node);
+ 
++        break;
++    case GGML_OP_REL_POS_BIAS:
++        ggml_vk_rel_pos_bias(ctx, compute_ctx, src0, src1, node);
++
++        break;
++    case GGML_OP_SCATTER_ELEMENTS:
++        ggml_vk_scatter_elements(ctx, compute_ctx, node);
++
+         break;
+     case GGML_OP_POOL_1D:
+         ggml_vk_pool_1d(ctx, compute_ctx, src0, node);
+@@ -18364,6 +18513,7 @@ static bool ggml_backend_vk_device_supports_op(ggml_backend_dev_t dev, const ggm
+             return ggml_is_contiguous(op->src[0]) && op->src[0]->type == GGML_TYPE_I32
+                 && ggml_is_contiguous(op->src[1]) && op->src[1]->type == GGML_TYPE_I32;
+         case GGML_OP_IM2COL:
++        case GGML_OP_IM2COL_FAST_1D:
+             return ggml_is_contiguous(op->src[1])
+                 && op->src[1]->type == GGML_TYPE_F32
+                 && (op->type == GGML_TYPE_F32 || op->type == GGML_TYPE_F16);
+@@ -18439,7 +18589,22 @@ static bool ggml_backend_vk_device_supports_op(ggml_backend_dev_t dev, const ggm
+         case GGML_OP_SSM_CONV:
+             return op->src[0]->type == GGML_TYPE_F32;
+         case GGML_OP_CONV_TRANSPOSE_1D:
+-            return op->src[0]->type == GGML_TYPE_F32 && op->src[1]->type == GGML_TYPE_F32;
++            // the vulkan kernel assumes no padding and dilation 1 (p0/d0 come
++            // from op_params; older graphs built with the 6-arg builder always
++            // pass 0/1)
++            return op->src[0]->type == GGML_TYPE_F32 && op->src[1]->type == GGML_TYPE_F32
++                && ggml_get_op_params_i32(op, 1) == 0
++                && ggml_get_op_params_i32(op, 2) == 1;
++        case GGML_OP_REL_POS_BIAS:
++            return op->src[0]->type == GGML_TYPE_F32 && op->src[1]->type == GGML_TYPE_F32
++                && op->type == GGML_TYPE_F32
++                && ggml_is_contiguous(op->src[0]) && ggml_is_contiguous(op->src[1]);
++        case GGML_OP_SCATTER_ELEMENTS:
++            // src0 = data (F32), src1 = updates (F32), src2 = indices (I32)
++            return op->src[0]->type == GGML_TYPE_F32 && op->src[1]->type == GGML_TYPE_F32
++                && op->src[2]->type == GGML_TYPE_I32 && op->type == GGML_TYPE_F32
++                && ggml_is_contiguous(op->src[0]) && ggml_is_contiguous(op->src[1]) && ggml_is_contiguous(op)
++                && (ggml_get_op_params_i32(op, 0) != 1 || device->shader_atomic_float_add);
+         case GGML_OP_COL2IM_1D:
+             return (op->src[0]->type == GGML_TYPE_F32 ||
+                     op->src[0]->type == GGML_TYPE_F16 ||
+diff --git a/src/ggml-vulkan/vulkan-shaders/conv_transpose_1d.comp b/src/ggml-vulkan/vulkan-shaders/conv_transpose_1d.comp
+index 5217e18..d35e1b0 100644
+--- a/src/ggml-vulkan/vulkan-shaders/conv_transpose_1d.comp
++++ b/src/ggml-vulkan/vulkan-shaders/conv_transpose_1d.comp
+@@ -2,9 +2,14 @@
+ 
+ #include "types.glsl"
+ 
+-layout (binding = 0) readonly buffer A {A_TYPE data_a[];};   // src0 - kernel:    [K, Cout, Cin]
++// learned-ops patch: grouped transpose conv (PyTorch ConvTranspose1d layout).
++// p.Cout is the number of output channels PER GROUP (a->ne[1]) and p.Cin the
++// input channels PER GROUP (a->ne[2]); the dst has p.Cout * groups rows and
++// the workgroup id is the global output channel. For groups == 1 this is
++// identical to the original kernel.
++layout (binding = 0) readonly buffer A {A_TYPE data_a[];};   // src0 - kernel:    [K, Cout_pg, Cin_g]
+ layout (binding = 1) readonly buffer B {B_TYPE data_b[];};   // src1 - input:     [L, Cin]
+-layout (binding = 2) writeonly buffer D {D_TYPE data_d[];};     // dst - result      [KL, Cout]
++layout (binding = 2) writeonly buffer D {D_TYPE data_d[];};     // dst - result      [KL, Cout_pg*groups]
+ 
+ layout(local_size_x = 128 , local_size_y = 1, local_size_z = 1) in;
+ 
+@@ -36,6 +41,10 @@ uint splitWork(uint workSize){
+ }
+ 
+ void main(){
++    // per-group indices for this output channel (identity when groups == 1)
++    uint32_t Cout_pg_idx = Cout_idx % p.Cout;
++    uint32_t in_c_base   = (Cout_idx / p.Cout) * p.Cin;
++
+     for(uint32_t i = 0; i < splitWork(tmp_len); i++){
+         uint32_t idx = i*bs+tid;
+         if(idx < tmp_len){
+@@ -65,9 +74,9 @@ void main(){
+         for(uint32_t K_idx = 0; K_idx < p.K; K_idx++){
+             D_TYPE dp = 0.0;
+             for(uint32_t Cin_idx = 0; Cin_idx < p.Cin; Cin_idx++){
+-                A_TYPE elemKrn = data_a[K_idx + Cout_idx * p.nb01 + Cin_idx * p.nb02];
++                A_TYPE elemKrn = data_a[K_idx + Cout_pg_idx * p.nb01 + Cin_idx * p.nb02];
+                 if(L_idx < p.L){
+-                    B_TYPE elemInp = data_b[L_idx + Cin_idx*p.nb11];
++                    B_TYPE elemInp = data_b[L_idx + (in_c_base + Cin_idx)*p.nb11];
+                     dp = fma(elemKrn, elemInp, dp);
+                 }
+             }
+diff --git a/src/ggml-vulkan/vulkan-shaders/rel_pos_bias.comp b/src/ggml-vulkan/vulkan-shaders/rel_pos_bias.comp
+new file mode 100644
+index 0000000..90d50d2
+--- /dev/null
++++ b/src/ggml-vulkan/vulkan-shaders/rel_pos_bias.comp
+@@ -0,0 +1,63 @@
++#version 450
++
++#extension GL_EXT_shader_16bit_storage : require
++
++layout(local_size_x = 8, local_size_y = 8, local_size_z = 4) in;
++
++/* push_constants: H, W, B (heads/batch), C, rel_h (=2*H-1) */
++layout(push_constant) uniform Params {
++    uint H;
++    uint W;
++    uint B;
++    uint C;
++    uint rel_h;   /* 2*H-1 */
++    uint rel_w;   /* 2*W-1; rel_h + rel_w = W-stride of weight table */
++} p;
++
++/* src0 = x:    [C, H*W, B]  (ggml col-major = ONNX [B, H*W, C]) */
++layout(binding = 0) readonly buffer SrcX { float data_x[]; };
++
++/* src1 = wcat: [rel_h+rel_w, C]  (col-major = ONNX [C, rel_h+rel_w]) */
++layout(binding = 1) readonly buffer SrcW { float data_w[]; };
++
++/* dst:         [H*W, H*W, B]  (col-major = ONNX [B, H*W, H*W]) */
++layout(binding = 2) writeonly buffer Dst { float data_dst[]; };
++
++void main() {
++    /* Each thread computes one output element: (wk, hk, b) dispatched over
++     * (wq*hq) outer loop. Dispatch: x=wk, y=hk, z=b*HW+q_idx */
++    const uint wk   = gl_GlobalInvocationID.x;
++    const uint hk   = gl_GlobalInvocationID.y;
++    const uint bq   = gl_GlobalInvocationID.z;  /* b * HW + q_idx */
++
++    const uint HW     = p.H * p.W;
++    const uint Wstride = p.rel_h + p.rel_w;
++
++    if (wk >= p.W || hk >= p.H || bq >= p.B * HW) return;
++
++    const uint b     = bq / HW;
++    const uint q_idx = bq % HW;
++    const uint hq    = q_idx / p.W;
++    const uint wq    = q_idx % p.W;
++
++    /* x[b, hq*W+wq, c]  for H-axis dot  — ggml offset: c + q_idx*C + b*C*HW */
++    /* x[b, wq*H+hq, c]  for W-axis dot  — ggml offset: c + (wq*H+hq)*C + b*C*HW */
++    const uint x_base_hw = b * p.C * HW + q_idx * p.C;
++    const uint x_base_wh = b * p.C * HW + (wq * p.H + hq) * p.C;
++
++    const uint r_h = hq - hk + p.H - 1;   /* relative height index */
++    const uint r_w = wq - wk + p.W - 1;   /* relative width  index */
++
++    /* dot(x_hw, W_h[:, r_h]):  W_h is first rel_h columns of wcat
++     * wcat layout: w[c * Wstride + r] */
++    float dot_h = 0.0;
++    float dot_w = 0.0;
++    for (uint ci = 0; ci < p.C; ci++) {
++        dot_h += data_x[x_base_hw + ci] * data_w[ci * Wstride + r_h];
++        dot_w += data_x[x_base_wh + ci] * data_w[ci * Wstride + p.rel_h + r_w];
++    }
++
++    const uint k_idx = hk * p.W + wk;
++    /* dst ggml [HW, HW, B]: dst[k_idx + q_idx*HW + b*HW*HW] */
++    data_dst[k_idx + q_idx * HW + b * HW * HW] = dot_h + dot_w;
++}
+diff --git a/src/ggml-vulkan/vulkan-shaders/scatter_elements.comp b/src/ggml-vulkan/vulkan-shaders/scatter_elements.comp
+new file mode 100644
+index 0000000..1f96a15
+--- /dev/null
++++ b/src/ggml-vulkan/vulkan-shaders/scatter_elements.comp
+@@ -0,0 +1,67 @@
++#version 450
++
++#ifdef SCATTER_ADD
++#extension GL_EXT_shader_atomic_float : enable
++#endif
++
++#include "types.glsl"
++
++layout(local_size_x = 256, local_size_y = 1, local_size_z = 1) in;
++
++layout (push_constant) uniform parameter
++{
++    uint ne;
++    uint ne00; uint ne01; uint ne02; uint ne03; uint nb00; uint nb01; uint nb02; uint nb03;
++    uint ne10; uint ne11; uint ne12; uint ne13; uint nb10; uint nb11; uint nb12; uint nb13;
++    uint ne20; uint ne21; uint ne22; uint ne23; uint nb20; uint nb21; uint nb22; uint nb23;
++    uint misalign_offsets;
++    float param1; float param2; int param3;
++} p;
++
++layout (binding = 0) readonly  buffer A { float data_a[]; };  // updates (src0)
++layout (binding = 1) readonly  buffer B { int   data_b[]; };  // indices (src1)
++layout (binding = 2)           buffer D { float data_d[]; };  // output (pre-filled with data)
++
++uint get_aoffset() { return p.misalign_offsets >> 16; }
++uint get_boffset() { return (p.misalign_offsets >> 8) & 0xFF; }
++uint get_doffset() { return p.misalign_offsets & 0xFF; }
++
++void main() {
++    const uint gid = gl_GlobalInvocationID.x;
++
++    /* Total elements in updates = ne00 * ne01 * ne02 * ne03 */
++    const uint total = p.ne00 * p.ne01 * p.ne02 * p.ne03;
++    if (gid >= total) return;
++
++    /* axis is stored in param3 (ggml dim order) */
++    const int axis = p.param3;
++
++    /* Decompose flat index into 4D multi-index for updates */
++    uint rem = gid;
++    uint mi3 = rem / (p.ne00 * p.ne01 * p.ne02);
++    rem -= mi3 * (p.ne00 * p.ne01 * p.ne02);
++    uint mi2 = rem / (p.ne00 * p.ne01);
++    rem -= mi2 * (p.ne00 * p.ne01);
++    uint mi1 = rem / p.ne00;
++    uint mi0 = rem - mi1 * p.ne00;
++
++    /* Read scatter index */
++    const int scatter_idx = data_b[get_boffset() + gid];
++
++    /* Build dst multi-index: same as updates, except along axis */
++    uint di0 = mi0, di1 = mi1, di2 = mi2, di3 = mi3;
++    if      (axis == 0) di0 = uint(scatter_idx);
++    else if (axis == 1) di1 = uint(scatter_idx);
++    else if (axis == 2) di2 = uint(scatter_idx);
++    else                di3 = uint(scatter_idx);
++
++    /* dst strides (contiguous): ne20=dst.ne[0], ne21=dst.ne[1], etc. */
++    const uint dst_off = get_doffset() + di0 + di1 * p.ne20 + di2 * p.ne20 * p.ne21 + di3 * p.ne20 * p.ne21 * p.ne22;
++    const float val = data_a[get_aoffset() + gid];
++
++#ifdef SCATTER_ADD
++    atomicAdd(data_d[dst_off], val);
++#else
++    data_d[dst_off] = val;
++#endif
++}
+diff --git a/src/ggml-vulkan/vulkan-shaders/vulkan-shaders-gen.cpp b/src/ggml-vulkan/vulkan-shaders/vulkan-shaders-gen.cpp
+index c93d6ee..347155c 100644
+--- a/src/ggml-vulkan/vulkan-shaders/vulkan-shaders-gen.cpp
++++ b/src/ggml-vulkan/vulkan-shaders/vulkan-shaders-gen.cpp
+@@ -1044,6 +1044,12 @@ void process_shaders() {
+     string_to_spv("timestep_embedding_f32", "timestep_embedding.comp", merge_maps(base_dict, {{"A_TYPE", "float"}, {"D_TYPE", "float"}}));
+ 
+     string_to_spv("conv_transpose_1d_f32", "conv_transpose_1d.comp", {{"A_TYPE", "float"},  {"B_TYPE", "float"}, {"D_TYPE", "float"}});
++
++    // learned-ops patch (from ggmlR)
++    string_to_spv("rel_pos_bias_f32", "rel_pos_bias.comp", {});
++    string_to_spv("scatter_elements_none", "scatter_elements.comp", {});
++    string_to_spv("scatter_elements_add", "scatter_elements.comp", {{"SCATTER_ADD", "1"}});
++
+     string_to_spv("col2im_1d_f32",  "col2im_1d.comp", {{"DATA_A_F32", "1"},  {"A_TYPE", "float"},     {"D_TYPE", "float"}});
+     string_to_spv("col2im_1d_f16",  "col2im_1d.comp", {{"DATA_A_F16", "1"},  {"A_TYPE", "float16_t"}, {"D_TYPE", "float16_t"}});
+     string_to_spv("col2im_1d_bf16", "col2im_1d.comp", {{"DATA_A_BF16", "1"}, {"A_TYPE", "uint16_t"},  {"D_TYPE", "uint16_t"}});
+diff --git a/src/ggml.c b/src/ggml.c
+index da7f3a5..38616ac 100644
+--- a/src/ggml.c
++++ b/src/ggml.c
+@@ -1098,9 +1098,16 @@ static const char * GGML_OP_NAME[GGML_OP_COUNT] = {
+     "OPT_STEP_SGD",
+ 
+     "GLU",
++
++    "IM2COL_FAST_1D",
++    "SCATTER_ELEMENTS",
++    "REL_POS_BIAS",
++
++    "ADD_LEAKY_RELU",
++    "CONV_DIRECT_1D",
+ };
+ 
+-static_assert(GGML_OP_COUNT == 101, "GGML_OP_COUNT != 101");
++static_assert(GGML_OP_COUNT == 106, "GGML_OP_COUNT != 106");
+ 
+ static const char * GGML_OP_SYMBOL[GGML_OP_COUNT] = {
+     "none",
+@@ -1213,9 +1220,16 @@ static const char * GGML_OP_SYMBOL[GGML_OP_COUNT] = {
+     "sgd(x)",
+ 
+     "glu(x)",
++
++    "im2col_fast_1d(x)",
++    "scatter_elements(data, idx, upd)",
++    "rel_pos_bias(x, wcat)",
++
++    "add_leaky_relu(a,b,slope)",
++    "conv_direct_1d(w,x,b,pad,dil,slope)",
+ };
+ 
+-static_assert(GGML_OP_COUNT == 101, "GGML_OP_COUNT != 101");
++static_assert(GGML_OP_COUNT == 106, "GGML_OP_COUNT != 106");
+ 
+ static_assert(GGML_OP_POOL_COUNT == 2, "GGML_OP_POOL_COUNT != 2");
+ 
+@@ -3932,6 +3946,54 @@ struct ggml_tensor * ggml_get_rows_back(
+     return result;
+ }
+ 
++// ggml_scatter_elements (ported from ggmlR)
++
++struct ggml_tensor * ggml_scatter_elements(
++        struct ggml_context * ctx,
++        struct ggml_tensor  * data,
++        struct ggml_tensor  * updates,
++        struct ggml_tensor  * indices,
++        int                   reduction,
++        int                   axis) {
++    /* ONNX ScatterElements: indices and updates have the same shape.
++     * For each multi-index (i0,i1,...) in indices/updates:
++     *   output[...axis_idx=indices[i0,i1,...], ...] = updates[i0,i1,...]
++     * axis is in ggml dim order (0 = ne[0]).
++     * data: [ne0, ne1, ...], output shape = data shape. */
++    GGML_ASSERT(data->type    == GGML_TYPE_F32);
++    GGML_ASSERT(updates->type == GGML_TYPE_F32);
++    GGML_ASSERT(indices->type == GGML_TYPE_I32);
++    GGML_ASSERT(reduction == 0 || reduction == 1);
++    GGML_ASSERT(axis >= 0 && axis < GGML_MAX_DIMS);
++    GGML_ASSERT(ggml_is_contiguous(data));
++    GGML_ASSERT(ggml_is_contiguous(updates));
++    GGML_ASSERT(ggml_is_contiguous(indices));
++
++    /* The kernels (CPU / Vulkan) flatten updates and indices with the same
++     * multi-index, so updates and indices must have identical shapes.
++     * data must match updates except along the scatter axis, where index
++     * values must stay within data->ne[axis] (checked per element at
++     * runtime, ONNX leaves invalid indices undefined). */
++    for (int d = 0; d < GGML_MAX_DIMS; ++d) {
++        GGML_ASSERT(updates->ne[d] == indices->ne[d]);
++        if (d != axis) {
++            GGML_ASSERT(updates->ne[d] == data->ne[d]);
++        }
++    }
++
++    struct ggml_tensor * result = ggml_new_tensor(ctx, GGML_TYPE_F32, GGML_MAX_DIMS, data->ne);
++
++    int32_t params[] = { reduction, axis };
++    memcpy(result->op_params, params, sizeof(params));
++
++    result->op     = GGML_OP_SCATTER_ELEMENTS;
++    result->src[0] = data;
++    result->src[1] = updates;
++    result->src[2] = indices;
++
++    return result;
++}
++
+ // ggml_set_rows
+ 
+ struct ggml_tensor * ggml_set_rows(
+@@ -4537,6 +4599,88 @@ struct ggml_tensor * ggml_conv_1d(
+     return result;
+ }
+ 
++// ggml_im2col_fast_1d (ported from 0xShug0/audio.cpp)
++//
++// Same geometry and op_params as ggml_im2col (1D, is_2D == false), but tagged
++// with GGML_OP_IM2COL_FAST_1D so backends can pick the 1D-specialized kernel.
++// The CPU specialization reduces each output row to an O(1) valid input
++// window with head/tail zero-fill and memcpy when dilation == 1.
++
++static struct ggml_tensor * ggml_im2col_fast_1d_impl(
++        struct ggml_context * ctx,
++        struct ggml_tensor  * a,
++        struct ggml_tensor  * b,
++        int                   s0,
++        int                   s1,
++        int                   p0,
++        int                   p1,
++        int                   d0,
++        int                   d1,
++        bool                  is_2D,
++        enum ggml_type        dst_type) {
++    struct ggml_tensor * result = ggml_im2col(ctx, a, b, s0, s1, p0, p1, d0, d1, is_2D, dst_type);
++    result->op = GGML_OP_IM2COL_FAST_1D;
++    return result;
++}
++
++// Public 1D form (stride/padding/dilation + explicit dst_type).  Keeps an F32
++// im2col buffer available for precision-sensitive paths.
++// ow_align > 1 rounds the output length UP to a multiple of ow_align: rows in
++// [OW, align_up(OW)) are computed from partially out-of-range windows (the
++// kernel zero-fills), which is numerically identical to conv zero padding for
++// the valid rows, so the caller can crop them with a free view.  This exists
++// so GEMM-friendly lengths (e.g. multiples of 16 for the CPU tinyBLAS tiling)
++// can be enforced without touching the input tensor.
++struct ggml_tensor * ggml_im2col_fast_1d(
++        struct ggml_context * ctx,
++        struct ggml_tensor  * a,
++        struct ggml_tensor  * b,
++        int                   s0,
++        int                   p0,
++        int                   d0,
++        enum ggml_type        dst_type,
++        int                   ow_align) {
++    GGML_ASSERT(b->ne[1] == a->ne[1]);
++    GGML_ASSERT(b->ne[3] == 1);
++    GGML_ASSERT(ow_align >= 1);
++
++    const int64_t OW = ggml_calc_conv_output_size(b->ne[0], a->ne[0], s0, p0, d0);
++    int64_t OWp = OW;
++    if (ow_align > 1) {
++        OWp = (OW + ow_align - 1) / ow_align * ow_align;
++    }
++    GGML_ASSERT(OW > 0 && "b too small compared to a");
++
++    const int64_t ne[4] = { a->ne[1] * a->ne[0], OWp, b->ne[2], 1 };
++    struct ggml_tensor * result = ggml_new_tensor(ctx, dst_type, 4, ne);
++    int32_t params[] = { s0, 0, p0, 0, d0, 0, 0 };
++    ggml_set_op_params(result, params, sizeof(params));
++
++    result->op     = GGML_OP_IM2COL_FAST_1D;
++    result->src[0] = a;
++    result->src[1] = b;
++    return result;
++}
++
++struct ggml_tensor * ggml_conv_1d_fast_1d_im2col(
++        struct ggml_context * ctx,
++        struct ggml_tensor  * a,
++        struct ggml_tensor  * b,
++        int                   s0,
++        int                   p0,
++        int                   d0) {
++    struct ggml_tensor * im2col = ggml_im2col_fast_1d_impl(ctx, a, b, s0, 0, p0, 0, d0, 0, false, a->type == GGML_TYPE_BF16 ? GGML_TYPE_F32 : GGML_TYPE_F16); // [N, OL, IC * K]
++
++    struct ggml_tensor * result =
++        ggml_mul_mat(ctx,
++                ggml_reshape_2d(ctx, im2col, im2col->ne[0], (im2col->ne[2] * im2col->ne[1])), // [N, OL, IC * K] => [N*OL, IC * K]
++                ggml_reshape_2d(ctx, a, (a->ne[0] * a->ne[1]), a->ne[2]));                    // [OC，IC, K] => [OC, IC * K]
++
++    result = ggml_reshape_3d(ctx, result, im2col->ne[1], a->ne[2], im2col->ne[2]); // [N, OC, OL]
++
++    return result;
++}
++
+ // ggml_conv_1d_ph
+ 
+ struct ggml_tensor* ggml_conv_1d_ph(
+@@ -4616,31 +4760,40 @@ struct ggml_tensor * ggml_col2im_1d(
+ 
+ // ggml_conv_transpose_1d
+ 
+-static int64_t ggml_calc_conv_transpose_1d_output_size(int64_t ins, int64_t ks, int s, int p, int d) {
+-    return (ins - 1) * s - 2 * p + d * (ks - 1) + 1;
++static int64_t ggml_calc_conv_transpose_1d_output_size(int64_t ins, int64_t ks, int s, int p, int d, int op) {
++    return (ins - 1) * s - 2 * p + d * (ks - 1) + op + 1;
+ }
+ 
+-GGML_API struct ggml_tensor * ggml_conv_transpose_1d(
++// extended variant (ported from mmwillet/TTS.cpp's ggml fork, groups semantics
++// reworked to match PyTorch ConvTranspose1d: a is [K, Cout/g0, Cin/g0]).
++// output_padding (op0) is folded into the output shape only: the kernels
++// leave those trailing positions at zero, so they are never passed down.
++struct ggml_tensor * ggml_conv_transpose_1d_ext(
+         struct ggml_context * ctx,
+         struct ggml_tensor  * a,
+         struct ggml_tensor  * b,
+         int                   s0,
+         int                   p0,
+-        int                   d0) {
++        int                   d0,
++        int                   op0,
++        int                   g0) {
+     GGML_ASSERT(ggml_is_matrix(b));
+-    GGML_ASSERT(a->ne[2] == b->ne[1]);
+     GGML_ASSERT(a->ne[3] == 1);
+-
+-    GGML_ASSERT(p0 == 0);
+     GGML_ASSERT(d0 == 1);
++    GGML_ASSERT(op0 >= 0);
++    GGML_ASSERT(g0 >= 1);
++
++    GGML_ASSERT(b->ne[1] % g0 == 0);
++    GGML_ASSERT(a->ne[2] == b->ne[1] / g0);
++    GGML_ASSERT(p0 == 0 || s0 % p0 == 0);
+ 
+     const int64_t ne[4] = {
+-        ggml_calc_conv_transpose_1d_output_size(b->ne[0], a->ne[0], s0, 0 /*p0*/, 1 /*d0*/),
+-        a->ne[1], b->ne[2], 1,
++        ggml_calc_conv_transpose_1d_output_size(b->ne[0], a->ne[0], s0, p0, d0, op0),
++        a->ne[1]*g0, b->ne[2], 1,
+     };
+     struct ggml_tensor * result = ggml_new_tensor(ctx, GGML_TYPE_F32, 4, ne);
+ 
+-    int32_t params[] = { s0, p0, d0 };
++    int32_t params[] = { s0, p0, d0, g0 };
+     ggml_set_op_params(result, params, sizeof(params));
+ 
+     result->op     = GGML_OP_CONV_TRANSPOSE_1D;
+@@ -4650,6 +4803,16 @@ GGML_API struct ggml_tensor * ggml_conv_transpose_1d(
+     return result;
+ }
+ 
++GGML_API struct ggml_tensor * ggml_conv_transpose_1d(
++        struct ggml_context * ctx,
++        struct ggml_tensor  * a,
++        struct ggml_tensor  * b,
++        int                   s0,
++        int                   p0,
++        int                   d0) {
++    return ggml_conv_transpose_1d_ext(ctx, a, b, s0, p0, d0, 0, 1);
++}
++
+ // ggml_conv_2d
+ 
+ // a: [OC，IC, KH, KW]
+@@ -5758,6 +5921,138 @@ struct ggml_tensor * ggml_add_rel_pos_inplace(
+     return ggml_add_rel_pos_impl(ctx, a, pw, ph, true);
+ }
+ 
++// ggml_rel_pos_bias (ported from ggmlR)
++
++struct ggml_tensor * ggml_rel_pos_bias(
++        struct ggml_context * ctx,
++        struct ggml_tensor  * x,
++        struct ggml_tensor  * wcat,
++        int                   H,
++        int                   W) {
++    GGML_ASSERT(x->type    == GGML_TYPE_F32);
++    GGML_ASSERT(wcat->type == GGML_TYPE_F32);
++    GGML_ASSERT(ggml_is_contiguous(x));
++    GGML_ASSERT(ggml_is_contiguous(wcat));
++
++    const int B  = (int)x->ne[2];
++    const int HW = H * W;
++
++    GGML_ASSERT(x->ne[1] == HW);
++    GGML_ASSERT(wcat->ne[0] == (2 * H - 1) + (2 * W - 1)); /* rel_h + rel_w */
++
++    struct ggml_tensor * result = ggml_new_tensor_3d(ctx, GGML_TYPE_F32, HW, HW, B);
++
++    ggml_set_op_params_i32(result, 0, H);
++    ggml_set_op_params_i32(result, 1, W);
++    ggml_set_op_params_i32(result, 2, B);
++    ggml_set_op_params_i32(result, 3, (int)x->ne[0]);  /* C */
++    ggml_set_op_params_i32(result, 4, 2 * H - 1);      /* rel_h */
++
++    result->op     = GGML_OP_REL_POS_BIAS;
++    result->src[0] = x;
++    result->src[1] = wcat;
++
++    return result;
++}
++
++// ggml_add_leaky_relu
++
++struct ggml_tensor * ggml_add_leaky_relu(
++        struct ggml_context * ctx,
++        struct ggml_tensor  * a,
++        struct ggml_tensor  * b,
++        float                 slope) {
++    GGML_ASSERT(a->type == GGML_TYPE_F32);
++    GGML_ASSERT(b->type == GGML_TYPE_F32);
++    GGML_ASSERT(ggml_is_contiguous(a));
++    GGML_ASSERT(ggml_is_contiguous(b));
++    GGML_ASSERT(a->ne[2] == 1 && a->ne[3] == 1);   // 2D [T, C]
++    GGML_ASSERT(b->ne[2] == 1 && b->ne[3] == 1);
++    GGML_ASSERT(b->ne[1] == a->ne[1]);              // same channel count
++    GGML_ASSERT(b->ne[0] == 1 || b->ne[0] == a->ne[0]); // broadcast or elementwise
++
++    struct ggml_tensor * result = ggml_new_tensor_2d(ctx, GGML_TYPE_F32, a->ne[0], a->ne[1]);
++
++    ggml_set_op_params(result, &slope, sizeof(float));
++
++    result->op     = GGML_OP_ADD_LEAKY_RELU;
++    result->src[0] = a;
++    result->src[1] = b;
++
++    return result;
++}
++
++// ggml_conv_direct_1d
++
++struct ggml_tensor * ggml_conv_direct_1d(
++        struct ggml_context * ctx,
++        struct ggml_tensor  * w,
++        struct ggml_tensor  * x,
++        struct ggml_tensor  * bias,
++        int                   pad,
++        int                   dil,
++        float                 leaky_slope) {
++    return ggml_conv_direct_1d_fused(ctx, w, x, bias, NULL, pad, dil, leaky_slope, 1.0f, 0.0f);
++}
++
++// full-featured variant: optional residual add (epilogue) and optional input
++// scaling/leaky (applied while packing the padded X copy in work data, so the
++// standalone SCALE / LEAKY_RELU producers of x can be skipped bit-identically)
++struct ggml_tensor * ggml_conv_direct_1d_fused(
++        struct ggml_context * ctx,
++        struct ggml_tensor  * w,
++        struct ggml_tensor  * x,
++        struct ggml_tensor  * bias,
++        struct ggml_tensor  * res,
++        int                   pad,
++        int                   dil,
++        float                 leaky_slope,
++        float                 in_scale,
++        float                 in_slope) {
++    GGML_ASSERT(w->type == GGML_TYPE_F32);
++    GGML_ASSERT(x->type == GGML_TYPE_F32);
++    GGML_ASSERT(bias == NULL || bias->type == GGML_TYPE_F32);
++    GGML_ASSERT(res == NULL || res->type == GGML_TYPE_F32);
++    GGML_ASSERT(ggml_is_contiguous(x));
++    GGML_ASSERT(pad >= 0);
++    GGML_ASSERT(dil >= 1);
++
++    const int64_t K  = w->ne[0];
++    const int64_t IC = w->ne[1];
++    const int64_t OC = w->ne[2];
++    const int64_t T  = x->ne[0];
++    GGML_ASSERT(x->ne[1] == IC);
++    GGML_ASSERT(bias == NULL || bias->ne[0] == OC);
++    const int64_t OL = T + 2*pad - dil*(K - 1);
++    GGML_ASSERT(OL > 0);
++    // residual must match the output exactly (same-shape [OL, OC], contiguous)
++    if (res != NULL) {
++        GGML_ASSERT(ggml_is_contiguous(res));
++        GGML_ASSERT(res->ne[0] == OL && res->ne[1] == OC);
++    }
++
++    struct ggml_tensor * result = ggml_new_tensor_2d(ctx, GGML_TYPE_F32, OL, OC);
++
++    // op_params layout (7 x int32):
++    //   [0] pad, [1] dil, [2] leaky_slope (f32), [3] has_bias,
++    //   [4] in_scale (f32), [5] in_slope (f32), [6] has_res
++    int32_t params[7] = { pad, dil };
++    memcpy(&params[2], &leaky_slope, sizeof(float));
++    params[3] = bias != NULL;
++    memcpy(&params[4], &in_scale, sizeof(float));
++    memcpy(&params[5], &in_slope, sizeof(float));
++    params[6] = res != NULL;
++    ggml_set_op_params(result, params, sizeof(params));
++
++    result->op     = GGML_OP_CONV_DIRECT_1D;
++    result->src[0] = w;
++    result->src[1] = x;
++    result->src[2] = bias;
++    result->src[3] = res;
++
++    return result;
++}
++
+ // ggml_rwkv_wkv6
+ 
+ struct ggml_tensor * ggml_rwkv_wkv6(
+@@ -6981,7 +7276,8 @@ static void ggml_compute_backward(
+             }
+             GGML_ASSERT((!src2 || !src2_needs_grads) && "gradients for freq factors not implemented");
+         } break;
+-        case GGML_OP_IM2COL: {
++        case GGML_OP_IM2COL:
++        case GGML_OP_IM2COL_FAST_1D: {
+             if (src1_needs_grads) {
+                 const int32_t s0    = ggml_get_op_params_i32(tensor, 0);
+                 const int32_t s1    = ggml_get_op_params_i32(tensor, 1);
+@@ -7241,8 +7537,9 @@ void ggml_build_backward_expand(
+         bool ignore_src[GGML_MAX_SRC] = {false};
+         switch (node->op) {
+             // gradients in node->src[0] for one reason or another have no effect on output gradients
+-            case GGML_OP_IM2COL:      // only used for its shape
+-            case GGML_OP_IM2COL_BACK: // same as IM2COL
++            case GGML_OP_IM2COL:          // only used for its shape
++            case GGML_OP_IM2COL_FAST_1D:  // same as IM2COL
++            case GGML_OP_IM2COL_BACK:     // same as IM2COL
+                 ignore_src[0] = true;
+                 break;
+             case GGML_OP_UNARY: {
+diff --git a/tests-learned/bench_learned_ops.c b/tests-learned/bench_learned_ops.c
+new file mode 100644
+index 0000000..4573203
+--- /dev/null
++++ b/tests-learned/bench_learned_ops.c
+@@ -0,0 +1,347 @@
++// Benchmark: learned-ops vs native ggml implementations.
++//
++// Usage: bench_learned_ops [cpu|cuda|vulkan]
++//
++// Measures end-to-end graph_compute time for:
++//   1. ggml_conv_1d            vs  ggml_conv_1d_fast_1d_im2col   (1D conv parity + perf)
++//   2. ggml_conv_transpose_1d  vs  ggml_conv_transpose_1d_ext   (convT: ext vs 6-arg legacy)
++//   3. ggml_rel_pos_bias       (absolute, native has no equivalent)
++//   4. ggml_scatter_elements   (absolute, native has no equivalent)
++//
++// Reports median over N repeats, ms.
++
++#include <stdio.h>
++#include <stdlib.h>
++#include <string.h>
++#include <math.h>
++
++#include "ggml.h"
++#include "ggml-alloc.h"
++#include "ggml-backend.h"
++#include "ggml-cpu.h"
++
++#ifdef _WIN32
++#include <windows.h>
++static double now_s(void) {
++    static LARGE_INTEGER freq = {0}, base = {0};
++    if (freq.QuadPart == 0) { QueryPerformanceFrequency(&freq); QueryPerformanceCounter(&base); return 0; }
++    LARGE_INTEGER now; QueryPerformanceCounter(&now);
++    return (double)(now.QuadPart - base.QuadPart) / (double)freq.QuadPart;
++}
++#else
++#include <time.h>
++static double now_s(void) {
++    static struct timespec ts_base = {0,0};
++    if (ts_base.tv_sec == 0) { clock_gettime(CLOCK_MONOTONIC, &ts_base); return 0; }
++    struct timespec ts; clock_gettime(CLOCK_MONOTONIC, &ts);
++    return (ts.tv_sec - ts_base.tv_sec) + (ts.tv_nsec - ts_base.tv_nsec) * 1e-9;
++}
++#endif
++
++#ifdef USE_CUDA
++ggml_backend_t             ggml_backend_cuda_init(size_t dev_num);
++ggml_backend_buffer_type_t ggml_backend_cuda_buffer_type(size_t dev_num);
++#endif
++#ifdef USE_VULKAN
++ggml_backend_t             ggml_backend_vk_init(size_t dev_num);
++ggml_backend_buffer_type_t ggml_backend_vk_buffer_type(size_t dev_num);
++#endif
++
++static const char * g_backend = "cpu";
++static int g_threads = 8;          // CPU thread count
++static int g_warmup  = 3;
++static int g_repeats = 10;
++
++// format helper: rotating static buffers to allow multiple calls in one printf
++static const char * fnum(double v, const char * unit) {
++    static char buf[8][64];
++    static int  idx = 0;
++    int slot = (idx++) & 7;
++    snprintf(buf[slot], sizeof(buf[slot]), "%.3f%s", v, unit);
++    return buf[slot];
++}
++
++// ---- backend helpers (galloc + direct graph_compute, bypass sched) ----
++
++struct bench {
++    struct ggml_context * ctx;
++    ggml_backend_t backend;
++    ggml_backend_buffer_type_t buft;
++    ggml_gallocr_t galloc;
++    struct ggml_cgraph * gf;
++};
++
++static void bench_begin(struct bench * b) {
++    size_t buf_size = 256u*1024u*1024u;
++    struct ggml_init_params ip = { buf_size, NULL, /* no_alloc */ true };
++    b->ctx = ggml_init(ip);
++    b->backend = NULL; b->buft = NULL; b->galloc = NULL; b->gf = NULL;
++#ifdef USE_CUDA
++    if (strcmp(g_backend, "cuda") == 0) {
++        b->backend = ggml_backend_cuda_init(0);
++        b->buft = ggml_backend_cuda_buffer_type(0);
++        return;
++    }
++#endif
++#ifdef USE_VULKAN
++    if (strcmp(g_backend, "vulkan") == 0) {
++        b->backend = ggml_backend_vk_init(0);
++        b->buft = ggml_backend_vk_buffer_type(0);
++        return;
++    }
++#endif
++    b->backend = ggml_backend_cpu_init();
++    b->buft = ggml_backend_cpu_buffer_type();
++    // set CPU thread count
++    ggml_backend_cpu_set_n_threads(b->backend, g_threads);
++}
++
++static void bench_graph(struct bench * b, struct ggml_tensor * result) {
++    b->gf = ggml_new_graph(b->ctx);
++    ggml_build_forward_expand(b->gf, result);
++    b->galloc = ggml_gallocr_new(b->buft);
++    if (!ggml_gallocr_alloc_graph(b->galloc, b->gf)) {
++        printf("  galloc failed\n"); return;
++    }
++}
++
++static void bench_upload(struct bench * b, struct ggml_tensor * t, const void * host) {
++    ggml_backend_tensor_set(t, host, 0, ggml_nbytes(t));
++}
++static void bench_download(struct bench * b, const struct ggml_tensor * t, void * host) {
++    ggml_backend_tensor_get(t, host, 0, ggml_nbytes(t));
++}
++
++static double bench_time_compute(struct bench * b) {
++    // warmup
++    for (int i = 0; i < g_warmup; i++) ggml_backend_graph_compute(b->backend, b->gf);
++    // timed
++    double t0 = now_s();
++    for (int i = 0; i < g_repeats; i++) ggml_backend_graph_compute(b->backend, b->gf);
++    double t1 = now_s();
++    return (t1 - t0) * 1000.0 / g_repeats;   // ms per iter, mean
++}
++
++static void bench_end(struct bench * b) {
++    if (b->galloc) ggml_gallocr_free(b->galloc);
++    if (b->backend) ggml_backend_free(b->backend);
++    ggml_free(b->ctx);
++}
++
++static void fill_random(float * p, int n, unsigned seed) {
++    unsigned s = seed;
++    for (int i = 0; i < n; i++) {
++        s = s * 1103515245u + 12345u;
++        p[i] = (float)((s >> 16) % 2000) * 0.001f - 1.0f;
++    }
++}
++
++// ============ 1. conv_1d vs conv_1d_fast_1d ============
++
++struct conv_case { int L, IC, OC, K, s0, p0, d0; };
++
++// helper: build+run one graph variant of conv_1d and return mean ms
++static double run_conv_case(struct conv_case * cc, int variant, float * pa, float * px) {
++    // variant: 0 = ggml_conv_1d, 1 = ggml_conv_1d_fast_1d_im2col
++    struct bench b; bench_begin(&b);
++    struct ggml_tensor * a = ggml_new_tensor_3d(b.ctx, GGML_TYPE_F32, cc->K, cc->IC, cc->OC);
++    struct ggml_tensor * x = ggml_new_tensor_2d(b.ctx, GGML_TYPE_F32, cc->L, cc->IC);
++    struct ggml_tensor * r = variant == 0
++        ? ggml_conv_1d(b.ctx, a, x, cc->s0, cc->p0, cc->d0)
++        : ggml_conv_1d_fast_1d_im2col(b.ctx, a, x, cc->s0, cc->p0, cc->d0);
++    if (!ggml_backend_supports_op(b.backend, r)) {
++        bench_end(&b);
++        return -1;
++    }
++    bench_graph(&b, r);
++    bench_upload(&b, a, pa); bench_upload(&b, x, px);
++    double t = bench_time_compute(&b);
++    bench_end(&b);
++    return t;
++}
++
++static void bench_conv_1d(struct conv_case * cs, int n_cases, const char * label) {
++    printf("\n--- %s: conv_1d vs fast_1d (%s) ---\n", label, g_backend);
++    printf("  %8s %5s %5s %4s %4s %4s %4s | %10s %10s %7s\n",
++           "L","IC","OC","K","s","p","d","conv ms","fast ms","ratio");
++    for (int c = 0; c < n_cases; c++) {
++        struct conv_case * cc = &cs[c];
++        float * pa = malloc(sizeof(float) * (size_t)cc->K * cc->IC * cc->OC);
++        float * px = malloc(sizeof(float) * (size_t)cc->L * cc->IC);
++        fill_random(pa, (int)(cc->K * cc->IC * cc->OC), 1 + c);
++        fill_random(px, (int)(cc->L * cc->IC), 7 + c * 3);
++        double t1 = run_conv_case(cc, 0, pa, px);
++        double t2 = run_conv_case(cc, 1, pa, px);
++        printf("  %8d %5d %5d %4d %4d %4d %4d | %10.3f %10.3f %7.2fx\n",
++               cc->L, cc->IC, cc->OC, cc->K, cc->s0, cc->p0, cc->d0, t1, t2,
++               (t1 > 0 ? t1/t2 : 0));
++        free(pa); free(px);
++    }
++}
++
++// ============ 2. conv_transpose_1d vs ext ============
++
++struct convT_case { int L, Cin, Cout, K, s0, p0, op0, g0; };
++
++static double run_convT_case(struct convT_case * cc, int variant, float * pa, float * px) {
++    // variant: 0 = legacy 6-arg, 1 = ext 8-arg (op0/g0)
++    struct bench b; bench_begin(&b);
++    struct ggml_tensor * a = ggml_new_tensor_3d(b.ctx, GGML_TYPE_F32, cc->K, cc->Cout/cc->g0, cc->Cin/cc->g0);
++    struct ggml_tensor * x = ggml_new_tensor_2d(b.ctx, GGML_TYPE_F32, cc->L, cc->Cin);
++    struct ggml_tensor * r = variant == 0
++        ? ggml_conv_transpose_1d(b.ctx, a, x, cc->s0, cc->p0, 1)
++        : ggml_conv_transpose_1d_ext(b.ctx, a, x, cc->s0, cc->p0, 1, cc->op0, cc->g0);
++    if (!ggml_backend_supports_op(b.backend, r)) {
++        bench_end(&b);
++        return -1;
++    }
++    bench_graph(&b, r);
++    bench_upload(&b, a, pa); bench_upload(&b, x, px);
++    double t = bench_time_compute(&b);
++    bench_end(&b);
++    return t;
++}
++
++static void bench_convT(struct convT_case * cs, int n_cases, const char * label) {
++    printf("\n--- %s: conv_transpose_1d (6-arg) vs ext (%s) ---\n", label, g_backend);
++    printf("  %6s %5s %5s %4s %4s %4s %4s %4s | %10s %10s %7s\n",
++           "L","Cin","Cout","K","s","p","op","g","legacy ms","ext ms","ratio");
++    for (int c = 0; c < n_cases; c++) {
++        struct convT_case * cc = &cs[c];
++        float * pa = malloc(sizeof(float) * (size_t)cc->K * (cc->Cout/cc->g0) * (cc->Cin/cc->g0));
++        float * px = malloc(sizeof(float) * (size_t)cc->L * cc->Cin);
++        fill_random(pa, (int)(cc->K * (cc->Cout/cc->g0) * (cc->Cin/cc->g0)), 2 + c);
++        fill_random(px, (int)(cc->L * cc->Cin), 9 + c * 3);
++        // legacy 6-arg only supports g0==1 && p0==0 && op0==0 — skip when unsupported
++        double t1 = (cc->g0 == 1 && cc->p0 == 0 && cc->op0 == 0) ? run_convT_case(cc, 0, pa, px) : -1;
++        double t2 = run_convT_case(cc, 1, pa, px);
++        printf("  %6d %5d %5d %4d %4d %4d %4d %4d | %10s %10s %7s\n",
++               cc->L, cc->Cin, cc->Cout, cc->K, cc->s0, cc->p0, cc->op0, cc->g0,
++               t1 < 0 ? "SKIP" : fnum(t1,"ms"),
++               t2 < 0 ? "SKIP" : fnum(t2,"ms"),
++               (t1 > 0 && t2 > 0) ? fnum(t1/t2,"x") : "-");
++        free(pa); free(px);
++    }
++}
++
++// helpers for formatting
++
++
++// ============ 3. rel_pos_bias (absolute) ============
++
++struct rpb_case { int C, H, W, B; };
++
++static void bench_rel_pos(struct rpb_case * cs, int n_cases) {
++    printf("\n--- rel_pos_bias (absolute, %s) ---\n", g_backend);
++    printf("  %5s %5s %5s %5s | %10s %12s\n", "C","H","W","B","ms","GFLOP/s est");
++    for (int c = 0; c < n_cases; c++) {
++        int C = cs[c].C, H = cs[c].H, W = cs[c].W, B = cs[c].B;
++        int HW = H*W, Ws = (2*H-1)+(2*W-1);
++        struct bench b; bench_begin(&b);
++        struct ggml_tensor * x = ggml_new_tensor_3d(b.ctx, GGML_TYPE_F32, C, HW, B);
++        struct ggml_tensor * w = ggml_new_tensor_2d(b.ctx, GGML_TYPE_F32, Ws, C);
++        float * px = malloc(ggml_nbytes(x)); fill_random(px, (int)ggml_nelements(x), 3+c);
++        float * pw = malloc(ggml_nbytes(w)); fill_random(pw, (int)ggml_nelements(w), 5+c);
++        struct ggml_tensor * r = ggml_rel_pos_bias(b.ctx, x, w, H, W);
++        bench_graph(&b, r);
++        bench_upload(&b, x, px); bench_upload(&b, w, pw);
++        double t = (ggml_backend_supports_op(b.backend, r)) ? bench_time_compute(&b) : -1;
++        double flops = 2.0 * C * B * HW * HW * 2.0;   // dot products: 2*C per (k,q,b)
++        double gflops = (t > 0) ? flops / (t * 1e-3) / 1e9 : 0;
++        printf("  %5d %5d %5d %5d | %10s %12.1f\n", C, H, W, B,
++               t < 0 ? "SKIP" : fnum(t,"ms"), gflops);
++        free(px); free(pw);
++        bench_end(&b);
++    }
++}
++
++// ============ 4. scatter_elements (absolute) ============
++
++struct sc_case { int o0, o1, i0, i1, axis, reduction; }; // data=[o0,o1] upd/idx=[i0,i1]
++
++static void bench_scatter(struct sc_case * cs, int n_cases) {
++    printf("\n--- scatter_elements (absolute, %s) ---\n", g_backend);
++    printf("  %13s %13s %4s %4s | %10s %12s\n", "data[o0,o1]","upd[i0,i1]","axis","red","ms","GB/s est");
++    for (int c = 0; c < n_cases; c++) {
++        struct sc_case * cc = &cs[c];
++        struct bench b; bench_begin(&b);
++        struct ggml_tensor * data = ggml_new_tensor_2d(b.ctx, GGML_TYPE_F32, cc->o0, cc->o1);
++        struct ggml_tensor * upd  = ggml_new_tensor_2d(b.ctx, GGML_TYPE_F32, cc->i0, cc->i1);
++        struct ggml_tensor * idx  = ggml_new_tensor_2d(b.ctx, GGML_TYPE_I32, cc->i0, cc->i1);
++        float * pd = malloc(ggml_nbytes(data)); fill_random(pd, (int)ggml_nelements(data), 4+c);
++        float * pu = malloc(ggml_nbytes(upd));  fill_random(pu, (int)ggml_nelements(upd), 6+c);
++        int32_t * pi = malloc(ggml_nbytes(idx));
++        // indices range: axis==0 → [0, o0); axis==1 → [0, o1)
++        int bound = (cc->axis == 0) ? cc->o0 : cc->o1;
++        for (int i = 0; i < cc->i0*cc->i1; i++) pi[i] = (i*7+2) % bound;
++        struct ggml_tensor * r = ggml_scatter_elements(b.ctx, data, upd, idx, cc->reduction, cc->axis);
++        if (!ggml_backend_supports_op(b.backend, r)) {
++            printf("  data=[%5d,%5d] upd=[%5d,%5d] axis=%2d red=%2d |      SKIP\n",
++                   cc->o0, cc->o1, cc->i0, cc->i1, cc->axis, cc->reduction);
++            free(pd); free(pu); free(pi);
++            bench_end(&b);
++            continue;
++        }
++        bench_graph(&b, r);
++        bench_upload(&b, data, pd); bench_upload(&b, upd, pu); bench_upload(&b, idx, pi);
++        double t = bench_time_compute(&b);
++        double bytes = (double)ggml_nbytes(data)*2 + ggml_nbytes(upd) + ggml_nbytes(idx);
++        double gbs = (t > 0) ? bytes / (t*1e-3) / 1e9 : 0;
++        printf("  data=[%5d,%5d] upd=[%5d,%5d] axis=%2d red=%2d | %10s %12.1f\n",
++               cc->o0, cc->o1, cc->i0, cc->i1, cc->axis, cc->reduction,
++               fnum(t,"ms"), gbs);
++        free(pd); free(pu); free(pi);
++        bench_end(&b);
++    }
++}
++
++int main(int argc, char ** argv) {
++    setvbuf(stdout, NULL, _IONBF, 0);
++    if (argc > 1) g_backend = argv[1];
++    if (argc > 2) g_threads = atoi(argv[2]);
++    now_s();   // init timer base
++    printf("== learned-ops benchmark (backend=%s, threads=%d, warmup=%d, repeats=%d) ==\n",
++           g_backend, g_threads, g_warmup, g_repeats);
++
++    // --- 1. conv_1d: shapes spanning TTS/Whisper conv1d stacks ---
++    struct conv_case conv_small[] = {
++        {100, 16, 32, 3, 1, 1, 1},
++        {200, 32, 64, 3, 1, 1, 1},
++        {500, 64, 128, 3, 2, 1, 1},
++    };
++    struct conv_case conv_large[] = {
++        {1000, 128, 256, 7, 2, 3, 1},   // Whisper-style
++        {2000, 256, 512, 3, 1, 1, 1},
++        {4000,  64, 128, 5, 2, 2, 1},
++    };
++    bench_conv_1d(conv_small, 3, "small");
++    bench_conv_1d(conv_large, 3, "large");
++
++    // --- 2. conv_transpose_1d: TTS-style ---
++    struct convT_case ct[] = {
++        {100, 32, 64, 3, 2, 0, 0, 1},    // plain
++        {100, 32, 64, 3, 2, 0, 2, 1},    // op0
++        {100, 32, 64, 3, 2, 0, 0, 2},   // groups=2
++        {200, 64,128, 5, 4, 0, 1, 4},   // groups=4 large
++        {500, 16, 32, 7, 1, 0, 0, 1},   // long kernel
++    };
++    bench_convT(ct, 5, "TTS-shapes");
++
++    // --- 3. rel_pos_bias ---
++    struct rpb_case rpb[] = {
++        {32,  8,  8, 1},
++        {64, 16, 16, 2},
++        {128,8,  8, 4},
++    };
++    bench_rel_pos(rpb, 3);
++
++    // --- 4. scatter_elements --- (data[o0,o1] vs upd/idx[i0,i1]; non-axis dims must match)
++    struct sc_case sc[] = {
++        {1024, 1024, 1024,  256, 1, 0},  // axis=1 scatter (row-major inner)
++        {4096, 4096, 4096, 1024, 1, 1},  // axis=1 add (atomic on GPU)
++        {1024, 1024,  256, 1024, 0, 0},  // axis=0 scatter (whole columns)
++    };
++    bench_scatter(sc, 3);
++
++    return 0;
++}
+diff --git a/tests-learned/test_learned_ops.c b/tests-learned/test_learned_ops.c
+new file mode 100644
+index 0000000..62dd987
+--- /dev/null
++++ b/tests-learned/test_learned_ops.c
+@@ -0,0 +1,647 @@
++// Smoke tests for the learned-ops patch (ggml v0.19.0 base).
++// Verifies, against hand-rolled references:
++//   1. ggml_conv_1d_fast_1d_im2col == ggml_conv_1d        (CPU reference kernels)
++//   2. ggml_conv_transpose_1d_ext  == naive reference     (output_padding, groups, padding)
++//   3. ggml_scatter_elements       == naive reference     (overwrite / add, axis 0/1)
++//   4. ggml_rel_pos_bias           == naive reference
++//   5. ggml_conv_direct_1d[_fused] == naive reference     (pad/dil/bias/leaky, residual,
++//                                                          input scale/leaky fusions,
++//                                                          non-multiple-of-16 OC, tails)
++//   6. ggml_add_leaky_relu         == add + leaky_relu   (broadcast [1,C] and rowwise [T,C] bias)
++//
++// Usage: test_learned_ops [cpu|vk]
++// (vk builds link ggml-vulkan and run every case on device 0; cases the
++//  backend reports as unsupported are skipped - on Vulkan that is convT
++//  with p0 != 0 / d0 != 1 and scatter-add without VK_EXT_shader_atomic_float.
++//  conv_direct_1d / add_leaky_relu are CPU-only ops and skip on vk.)
++
++#include <stdio.h>
++#include <stdlib.h>
++#include <string.h>
++#include <math.h>
++
++#include "ggml.h"
++#include "ggml-alloc.h"
++#include "ggml-backend.h"
++#include "ggml-cpu.h"
++
++#ifdef USE_VULKAN
++// provided by ggml-vulkan.dll (ggml.h GGML_API decls live in the backend lib)
++ggml_backend_t             ggml_backend_vk_init(size_t dev_num);
++ggml_backend_buffer_type_t ggml_backend_vk_buffer_type(size_t dev_num);
++#endif
++
++static int failures = 0;
++static const char * g_backend = "cpu";
++
++#define CHECK(cond, ...) do { \
++    if (!(cond)) { \
++        printf("  FAIL: " __VA_ARGS__); printf("  (%s:%d)\n", __FILE__, __LINE__); \
++        failures++; \
++    } \
++} while (0)
++
++static bool vec_close(const float * a, const float * b, int n, float tol) {
++    for (int i = 0; i < n; i++) {
++        if (fabsf(a[i] - b[i]) > tol) {
++            printf("    mismatch at %d: %f vs %f\n", i, a[i], b[i]);
++            return false;
++        }
++    }
++    return true;
++}
++
++static bool find_op_node(const struct ggml_tensor * t, enum ggml_op op, int depth) {
++    if (t == NULL || depth > 12) return false;
++    if (t->op == op) return true;
++    for (int i = 0; i < GGML_MAX_SRC; i++) {
++        if (t->src[i] && find_op_node(t->src[i], op, depth+1)) return true;
++    }
++    return false;
++}
++
++// per-test-case execution context
++struct tctx {
++    struct ggml_context * ctx;
++    ggml_backend_t backend;
++    ggml_backend_buffer_type_t buft;
++    ggml_gallocr_t galloc;
++    struct ggml_cgraph * gf;
++};
++
++static void tctx_begin(struct tctx * t) {
++    size_t buf_size = 32u*1024u*1024u;
++    struct ggml_init_params ip = { buf_size, NULL, /* no_alloc */ true };
++    t->ctx = ggml_init(ip);
++    t->backend = NULL;
++    t->buft = NULL;
++    t->galloc = NULL;
++    t->gf = NULL;
++#ifdef USE_VULKAN
++    if (strcmp(g_backend, "vk") == 0) {
++        t->backend = ggml_backend_vk_init(0);
++        t->buft = ggml_backend_vk_buffer_type(0);
++        return;
++    }
++#endif
++    t->backend = ggml_backend_cpu_init();
++    t->buft = ggml_backend_cpu_buffer_type();
++}
++
++// build the forward graph for `result` (plus optional second root `result2`)
++// allocate intermediates on the test device and prepare for compute
++static bool tctx_alloc_graph(struct tctx * t, struct ggml_tensor * result, struct ggml_tensor * result2) {
++    if (!ggml_backend_supports_op(t->backend, result)) {
++        printf("  SKIP: %s does not support this op shape\n", g_backend);
++        return false;
++    }
++    t->gf = ggml_new_graph(t->ctx);
++    ggml_build_forward_expand(t->gf, result);
++    if (result2) {
++        ggml_build_forward_expand(t->gf, result2);
++    }
++    t->galloc = ggml_gallocr_new(t->buft);
++    if (!ggml_gallocr_alloc_graph(t->galloc, t->gf)) {
++        printf("  SKIP: galloc failed\n");
++        return false;
++    }
++    return true;
++}
++
++static void tctx_upload(struct tctx * t, struct ggml_tensor * tensor, const void * host) {
++    ggml_backend_tensor_set(tensor, host, 0, ggml_nbytes(tensor));
++}
++
++static void tctx_download(struct tctx * t, const struct ggml_tensor * tensor, void * host) {
++    ggml_backend_tensor_get(tensor, host, 0, ggml_nbytes(tensor));
++}
++
++static void tctx_compute(struct tctx * t) {
++    ggml_backend_graph_compute(t->backend, t->gf);
++}
++
++static void tctx_end(struct tctx * t) {
++    if (t->galloc) ggml_gallocr_free(t->galloc);
++    if (t->backend) ggml_backend_free(t->backend);
++    ggml_free(t->ctx);
++}
++
++// ---------- 1. conv_1d vs conv_1d_fast_1d_im2col ----------
++
++static void test_conv_1d_parity(void) {
++    printf("[test] conv_1d vs conv_1d_fast_1d_im2col parity\n");
++
++    struct {
++        int N, OC, IC, K, s0, p0, d0;
++    } cases[] = {
++        {1, 3, 2, 3, 1, 1, 1},
++        {2, 4, 3, 5, 2, 2, 1},
++        {1, 2, 1, 7, 3, 1, 1},
++        {1, 4, 2, 3, 2, 0, 2},   // dilated
++        {3, 8, 4, 4, 2, 1, 1},
++        {1, 1, 1, 1, 1, 0, 1},
++    };
++
++    for (size_t c = 0; c < sizeof(cases)/sizeof(cases[0]); c++) {
++        const int N = cases[c].N, OC = cases[c].OC, IC = cases[c].IC;
++        const int K = cases[c].K, s0 = cases[c].s0, p0 = cases[c].p0, d0 = cases[c].d0;
++        const int L = 23 + (int)c;
++        const int OL = (L + 2*p0 - d0*(K-1) - 1)/s0 + 1;
++
++        struct tctx t;
++        tctx_begin(&t);
++
++        // ggml conv_1d kernel layout: [K, IC, OC] (NOT PyTorch [OC, IC, K])
++        struct ggml_tensor * a = ggml_new_tensor_3d(t.ctx, GGML_TYPE_F32, K, IC, OC);
++        struct ggml_tensor * b = ggml_new_tensor_2d(t.ctx, GGML_TYPE_F32, L, IC);
++        ggml_set_name(a, "a");
++        ggml_set_name(b, "b");
++
++        float * pa = (float *)malloc(ggml_nbytes(a));
++        float * pb = (float *)malloc(ggml_nbytes(b));
++        for (int i = 0; i < (int)ggml_nelements(a); i++) pa[i] = (float)((i*7 + c) % 13) * 0.25f - 1.0f;
++        for (int i = 0; i < (int)ggml_nelements(b); i++) pb[i] = (float)((i*11 + (int)c*3) % 17) * 0.2f - 1.5f;
++
++        struct ggml_tensor * r1 = ggml_conv_1d(t.ctx, a, b, s0, p0, d0);
++        struct ggml_tensor * r2 = ggml_conv_1d_fast_1d_im2col(t.ctx, a, b, s0, p0, d0);
++        CHECK(r1->ne[0] == r2->ne[0] && r1->ne[1] == r2->ne[1] && r1->ne[2] == r2->ne[2],
++              "shape mismatch (case %zu)", c);
++        CHECK(OL == (int)r1->ne[0], "unexpected output length (case %zu)", c);
++        CHECK(find_op_node(r2, GGML_OP_IM2COL_FAST_1D, 0), "im2col not tagged FAST_1D (case %zu)", c);
++
++        if (!tctx_alloc_graph(&t, r1, r2)) { free(pa); free(pb); tctx_end(&t); continue; }
++        tctx_upload(&t, a, pa);
++        tctx_upload(&t, b, pb);
++        tctx_compute(&t);
++
++        float * o1 = (float *)malloc(ggml_nbytes(r1));
++        float * o2 = (float *)malloc(ggml_nbytes(r2));
++        tctx_download(&t, r1, o1);
++        tctx_download(&t, r2, o2);
++        CHECK(vec_close(o1, o2, (int)ggml_nelements(r1), 1e-3f), "outputs differ (case %zu: N%d OC%d IC%d K%d s%d p%d d%d)",
++              c, N, OC, IC, K, s0, p0, d0);
++
++        free(pa); free(pb); free(o1); free(o2);
++        tctx_end(&t);
++    }
++    printf("  done (%d failures so far)\n", failures);
++}
++
++// ---------- 2. conv_transpose_1d_ext ----------
++
++static void test_conv_transpose_1d_ext(void) {
++    printf("[test] conv_transpose_1d_ext (output_padding / groups / padding)\n");
++
++    struct {
++        int L, Cin, Cout, K, s0, p0, op0, g0;
++    } cases[] = {
++        {5, 2, 4, 3, 2, 0, 0, 1},   // plain
++        {5, 2, 4, 3, 2, 0, 2, 1},   // output_padding
++        {6, 4, 4, 3, 2, 1, 1, 1},   // padding
++        {6, 4, 4, 3, 2, 1, 0, 2},   // groups == 2
++        {7, 6, 3, 4, 2, 1, 1, 3},   // groups == 3
++        {4, 3, 3, 3, 1, 0, 1, 3},   // groups == Cin (depthwise-ish)
++    };
++
++    for (size_t c = 0; c < sizeof(cases)/sizeof(cases[0]); c++) {
++        const int L = cases[c].L, Cin = cases[c].Cin, Cout = cases[c].Cout;
++        const int K = cases[c].K, s0 = cases[c].s0, p0 = cases[c].p0;
++        const int op0 = cases[c].op0, g0 = cases[c].g0;
++        const int Cin_g = Cin / g0, Cout_pg = Cout / g0;
++        const int OL = (L - 1)*s0 - 2*p0 + (K - 1) + op0 + 1;
++
++        struct tctx t;
++        tctx_begin(&t);
++
++        // a: [K, Cout_pg, Cin_g], b: [L, Cin]
++        struct ggml_tensor * a = ggml_new_tensor_3d(t.ctx, GGML_TYPE_F32, K, Cout_pg, Cin_g);
++        struct ggml_tensor * b = ggml_new_tensor_2d(t.ctx, GGML_TYPE_F32, L, Cin);
++
++        float * pa = (float *)malloc(ggml_nbytes(a));
++        float * pb = (float *)malloc(ggml_nbytes(b));
++        for (int i = 0; i < (int)ggml_nelements(a); i++) pa[i] = (float)((i*5 + (int)c) % 9) * 0.3f - 1.0f;
++        for (int i = 0; i < (int)ggml_nelements(b); i++) pb[i] = (float)((i*3 + 1) % 11) * 0.25f - 1.0f;
++
++        struct ggml_tensor * r = ggml_conv_transpose_1d_ext(t.ctx, a, b, s0, p0, 1, op0, g0);
++        CHECK((int)r->ne[0] == OL && (int)r->ne[1] == Cout, "shape (case %zu): got [%d,%d] want [%d,%d]",
++              c, (int)r->ne[0], (int)r->ne[1], OL, Cout);
++
++        if (!tctx_alloc_graph(&t, r, NULL)) { free(pa); free(pb); tctx_end(&t); continue; }
++        tctx_upload(&t, a, pa);
++        tctx_upload(&t, b, pb);
++        tctx_compute(&t);
++
++        float * out = (float *)malloc(ggml_nbytes(r));
++        tctx_download(&t, r, out);
++
++        // naive reference
++        float * ref = (float *)calloc((size_t)OL * Cout, sizeof(float));
++        for (int oc = 0; oc < Cout; oc++) {
++            const int g = oc / Cout_pg;
++            const int oc_pg = oc % Cout_pg;
++            for (int i10 = 0; i10 < L; i10++) {
++                for (int k = 0; k < K; k++) {
++                    const int64_t o = (int64_t)i10*s0 + k - p0;
++                    if (o < 0 || o >= OL) continue;
++                    float acc = 0.0f;
++                    for (int cg = 0; cg < Cin_g; cg++) {
++                        const float w = pa[k + oc_pg*K + cg*K*Cout_pg];
++                        const float x = pb[i10 + (g*Cin_g + cg)*L];
++                        acc += w * x;
++                    }
++                    ref[oc*OL + o] += acc;
++                }
++            }
++        }
++        CHECK(vec_close(out, ref, OL*Cout, 1e-3f), "convT output differs (case %zu: L%d Cin%d Cout%d K%d s%d p%d op%d g%d)",
++              c, L, Cin, Cout, K, s0, p0, op0, g0);
++        free(ref);
++
++        free(pa); free(pb); free(out);
++        tctx_end(&t);
++    }
++    printf("  done (%d failures so far)\n", failures);
++}
++
++// ---------- 3. scatter_elements ----------
++
++static void test_scatter_elements(void) {
++    printf("[test] scatter_elements (overwrite / add, axis 0/1)\n");
++
++    // 2D case, axis 1
++    {
++        struct tctx t;
++        tctx_begin(&t);
++
++        const int d0 = 4, d1 = 6, u1 = 3;
++        struct ggml_tensor * data = ggml_new_tensor_2d(t.ctx, GGML_TYPE_F32, d0, d1);
++        struct ggml_tensor * upd  = ggml_new_tensor_2d(t.ctx, GGML_TYPE_F32, d0, u1);
++        struct ggml_tensor * idx  = ggml_new_tensor_2d(t.ctx, GGML_TYPE_I32, d0, u1);
++
++        float * pd = (float *)malloc(ggml_nbytes(data));
++        float * pu = (float *)malloc(ggml_nbytes(upd));
++        int32_t * pi = (int32_t *)malloc(ggml_nbytes(idx));
++        for (int i = 0; i < d0*d1; i++) pd[i] = (float)i * 0.5f;
++        for (int i = 0; i < d0*u1; i++) pu[i] = (float)(100 + i);
++        for (int i = 0; i < d0*u1; i++) pi[i] = (i * 5 + 2) % d1;
++
++        struct ggml_tensor * r0 = ggml_scatter_elements(t.ctx, data, upd, idx, 0, 1);
++        struct ggml_tensor * r1 = ggml_scatter_elements(t.ctx, data, upd, idx, 1, 1);
++
++        if (!tctx_alloc_graph(&t, r0, r1)) { free(pd); free(pu); free(pi); tctx_end(&t); return; }
++        tctx_upload(&t, data, pd);
++        tctx_upload(&t, upd, pu);
++        tctx_upload(&t, idx, pi);
++        tctx_compute(&t);
++
++        float * o0 = (float *)malloc(ggml_nbytes(r0));
++        float * o1 = (float *)malloc(ggml_nbytes(r1));
++        tctx_download(&t, r0, o0);
++        tctx_download(&t, r1, o1);
++
++        float * ref0 = (float *)malloc(sizeof(float)*d0*d1);
++        float * ref1 = (float *)malloc(sizeof(float)*d0*d1);
++        memcpy(ref0, pd, sizeof(float)*d0*d1);
++        memcpy(ref1, pd, sizeof(float)*d0*d1);
++        for (int j = 0; j < u1; j++) {
++            for (int i = 0; i < d0; i++) {
++                const int flat = j*d0 + i;
++                const int tt = pi[flat];
++                if (tt < 0) continue;
++                ref0[i + tt*d0] = pu[flat];
++                ref1[i + tt*d0] += pu[flat];
++            }
++        }
++
++        CHECK(vec_close(o0, ref0, d0*d1, 0.0f), "scatter overwrite (axis 1) differs");
++        CHECK(vec_close(o1, ref1, d0*d1, 0.0f), "scatter add (axis 1) differs");
++        free(pd); free(pu); free(pi); free(o0); free(o1); free(ref0); free(ref1);
++        tctx_end(&t);
++    }
++
++    // 1D case, axis 0, duplicate indices
++    {
++        struct tctx t;
++        tctx_begin(&t);
++
++        const int n = 10, m = 4;
++        struct ggml_tensor * data = ggml_new_tensor_1d(t.ctx, GGML_TYPE_F32, n);
++        struct ggml_tensor * upd  = ggml_new_tensor_1d(t.ctx, GGML_TYPE_F32, m);
++        struct ggml_tensor * idx  = ggml_new_tensor_1d(t.ctx, GGML_TYPE_I32, m);
++
++        float * pd = (float *)malloc(ggml_nbytes(data));
++        float * pu = (float *)malloc(ggml_nbytes(upd));
++        int32_t * pi = (int32_t *)malloc(ggml_nbytes(idx));
++        for (int i = 0; i < n; i++) pd[i] = (float)i;
++        for (int i = 0; i < m; i++) pu[i] = (float)(-i);
++        pi[0] = 3; pi[1] = 0; pi[2] = 9; pi[3] = 3;   // duplicate on purpose
++
++        struct ggml_tensor * r1 = ggml_scatter_elements(t.ctx, data, upd, idx, 1, 0);
++
++        if (!tctx_alloc_graph(&t, r1, NULL)) { free(pd); free(pu); free(pi); tctx_end(&t); return; }
++        tctx_upload(&t, data, pd);
++        tctx_upload(&t, upd, pu);
++        tctx_upload(&t, idx, pi);
++        tctx_compute(&t);
++
++        float * o1 = (float *)malloc(ggml_nbytes(r1));
++        tctx_download(&t, r1, o1);
++
++        float ref[10];
++        for (int i = 0; i < n; i++) ref[i] = (float)i;
++        for (int i = 0; i < m; i++) ref[pi[i]] += pu[i];
++
++        CHECK(vec_close(o1, ref, n, 0.0f), "scatter add (axis 0, duplicates) differs");
++
++        free(pd); free(pu); free(pi); free(o1);
++        tctx_end(&t);
++    }
++    printf("  done (%d failures so far)\n", failures);
++}
++
++// ---------- 4. rel_pos_bias ----------
++
++static void test_rel_pos_bias(void) {
++    printf("[test] rel_pos_bias vs naive reference\n");
++
++    struct { int C, H, W, B; } cases[] = {
++        {2, 3, 4, 1},
++        {3, 2, 2, 2},
++        {1, 5, 3, 1},
++    };
++
++    for (size_t c = 0; c < sizeof(cases)/sizeof(cases[0]); c++) {
++        const int C = cases[c].C, H = cases[c].H, W = cases[c].W, B = cases[c].B;
++        const int HW = H*W, rel_h = 2*H - 1, rel_w = 2*W - 1, Ws = rel_h + rel_w;
++
++        struct tctx t;
++        tctx_begin(&t);
++
++        struct ggml_tensor * x    = ggml_new_tensor_3d(t.ctx, GGML_TYPE_F32, C, HW, B);
++        struct ggml_tensor * wcat = ggml_new_tensor_2d(t.ctx, GGML_TYPE_F32, Ws, C);
++
++        float * px = (float *)malloc(ggml_nbytes(x));
++        float * pw = (float *)malloc(ggml_nbytes(wcat));
++        for (int i = 0; i < C*HW*B; i++) px[i] = (float)((i*3 + (int)c) % 7) * 0.4f - 1.0f;
++        for (int i = 0; i < C*Ws; i++)  pw[i] = (float)((i*5 + 1) % 11) * 0.3f - 1.2f;
++
++        struct ggml_tensor * r = ggml_rel_pos_bias(t.ctx, x, wcat, H, W);
++        CHECK((int)r->ne[0] == HW && (int)r->ne[1] == HW && (int)r->ne[2] == B, "shape (case %zu)", c);
++
++        if (!tctx_alloc_graph(&t, r, NULL)) { free(px); free(pw); tctx_end(&t); continue; }
++        tctx_upload(&t, x, px);
++        tctx_upload(&t, wcat, pw);
++        tctx_compute(&t);
++
++        float * out = (float *)malloc(ggml_nbytes(r));
++        tctx_download(&t, r, out);
++
++        // reference (ggml col-major): out[k + q*HW + b*HW*HW] =
++        //   sum_c x[c + q*C + b*C*HW] * w[c*Ws + r_h]  +
++        //   sum_c x[c + (wq*H+hq)*C + b*C*HW] * w[c*Ws + rel_h + r_w]
++        float * ref = (float *)calloc((size_t)HW*HW*B, sizeof(float));
++        for (int b = 0; b < B; b++) {
++            for (int q = 0; q < HW; q++) {
++                const int hq = q / W, wq = q % W;
++                for (int hk = 0; hk < H; hk++) {
++                    for (int wk = 0; wk < W; wk++) {
++                        const int k = hk*W + wk;
++                        const int r_h = hq - hk + H - 1;
++                        const int r_w = wq - wk + W - 1;
++                        float s = 0.0f;
++                        for (int ci = 0; ci < C; ci++) {
++                            s += px[ci + q*C + b*C*HW] * pw[ci*Ws + r_h];
++                            s += px[ci + (wq*H + hq)*C + b*C*HW] * pw[ci*Ws + rel_h + r_w];
++                        }
++                        ref[k + (size_t)q*HW + (size_t)b*HW*HW] = s;
++                    }
++                }
++            }
++        }
++        CHECK(vec_close(out, ref, HW*HW*B, 1e-3f), "rel_pos_bias differs (case %zu: C%d H%d W%d B%d)", c, C, H, W, B);
++        free(ref);
++
++        free(px); free(pw); free(out);
++        tctx_end(&t);
++    }
++    printf("  done (%d failures so far)\n", failures);
++}
++
++// ---------- 5. conv_direct_1d (+fused variants) ----------
++
++// naive reference for ggml_conv_direct_1d[_fused]:
++//   out[t, oc] = act( bias[oc] + sum_{ic,kw} w[kw, ic, oc] * xin(t + kw*dil - pad, ic) + res[t, oc] )
++//   xin(t, ic) = act_in( x[t, ic] * in_scale ), zero outside [0, T)
++// x layout [T, IC] contiguous (memory: ic*T + t), w [K, IC, OC] (oc*IC*K),
++// out [OL, OC] (oc*OL + t), OL = T + 2*pad - dil*(K-1).
++static void ref_conv_direct_1d(const float * w, const float * x, const float * b,
++                               const float * res, int K, int IC, int OC, int T,
++                               int pad, int dil, float slope, float in_scale,
++                               float in_slope, float * out, int OL) {
++    for (int oc = 0; oc < OC; oc++) {
++        for (int t = 0; t < OL; t++) {
++            float acc = b ? b[oc] : 0.0f;
++            for (int ic = 0; ic < IC; ic++) {
++                for (int kw = 0; kw < K; kw++) {
++                    const int64_t xi = (int64_t)t + (int64_t)kw*dil - pad;
++                    float xv = 0.0f;
++                    if (xi >= 0 && xi < T) {
++                        xv = x[(size_t)ic*T + xi];
++                        if (in_scale != 1.0f) xv *= in_scale;
++                        if (in_slope != 0.0f) xv = (xv > 0.0f ? xv : 0.0f) + in_slope * (xv < 0.0f ? xv : 0.0f);
++                    }
++                    acc += w[((size_t)oc*IC + ic)*K + kw] * xv;
++                }
++            }
++            if (res) acc = acc + res[(size_t)oc*OL + t];
++            if (slope != 0.0f) acc = (acc > 0.0f ? acc : 0.0f) + slope * (acc < 0.0f ? acc : 0.0f);
++            out[(size_t)oc*OL + t] = acc;
++        }
++    }
++}
++
++static void test_conv_direct_1d(void) {
++    printf("[test] conv_direct_1d / conv_direct_1d_fused vs naive reference\n");
++
++    struct {
++        int OC, IC, K, pad, dil;
++        int bias, res, fused_io;   // case config
++        float slope, in_scale, in_slope;
++    } cases[] = {
++        // basic shapes, plain conv + bias
++        {16,  8, 3, 1, 1, 1, 0, 0, 0.0f, 1.0f, 0.0f},
++        {32, 16, 3, 1, 1, 1, 0, 0, 0.0f, 1.0f, 0.0f},
++        {30, 13, 3, 1, 1, 1, 0, 0, 0.0f, 1.0f, 0.0f},   // OC,IC not multiples of 16
++        {8,   5, 7, 3, 1, 1, 0, 0, 0.0f, 1.0f, 0.0f},
++        {17,  9, 11, 5, 1, 1, 0, 0, 0.0f, 1.0f, 0.0f},  // odd OC, long kernel
++        {24, 12, 3, 3, 3, 1, 0, 0, 0.0f, 1.0f, 0.0f},   // dilated
++        {24, 12, 7, 10, 5, 1, 0, 0, 0.0f, 1.0f, 0.0f},  // K=7 dil=5
++        {6,   4, 3, 1, 1, 0, 0, 0, 0.0f, 1.0f, 0.0f},   // bias == NULL
++        {16,  8, 3, 0, 1, 1, 0, 0, 0.0f, 1.0f, 0.0f},   // pad == 0
++        // output leaky (convs1-style epilogue)
++        {16,  8, 3, 1, 1, 1, 0, 0, 0.1f, 1.0f, 0.0f},
++        {30, 13, 7, 3, 3, 1, 0, 0, 0.1f, 1.0f, 0.0f},
++        // residual (convs2-style epilogue)
++        {16,  8, 3, 1, 1, 1, 1, 0, 0.0f, 1.0f, 0.0f},
++        {30, 13, 3, 1, 1, 1, 1, 0, 0.1f, 1.0f, 0.0f},   // residual + output leaky
++        // producer-side input scale / leaky
++        {16,  8, 3, 1, 1, 1, 0, 1, 0.0f, 0.33333334f, 0.0f},
++        {16,  8, 3, 1, 1, 1, 0, 1, 0.0f, 1.0f, 0.1f},
++        {30, 13, 7, 3, 1, 1, 0, 1, 0.0f, 0.5f, 0.1f},   // scale + leaky + odd OC
++        // everything at once
++        {30, 13, 3, 1, 3, 1, 1, 1, 0.1f, 0.33333334f, 0.1f},
++    };
++
++    for (size_t c = 0; c < sizeof(cases)/sizeof(cases[0]); c++) {
++        const int OC = cases[c].OC, IC = cases[c].IC, K = cases[c].K;
++        const int pad = cases[c].pad, dil = cases[c].dil;
++        // T chosen so OL covers: multiple of 6, remainder 1, remainder 4 (partial tail)
++        const int OL_target = 25 + (int)c;
++        const int T = OL_target + dil*(K-1) - 2*pad;
++        const int OL = T + 2*pad - dil*(K-1);
++        if (T <= 0) continue;
++
++        struct tctx t;
++        tctx_begin(&t);
++
++        struct ggml_tensor * a  = ggml_new_tensor_3d(t.ctx, GGML_TYPE_F32, K, IC, OC);
++        struct ggml_tensor * b  = ggml_new_tensor_2d(t.ctx, GGML_TYPE_F32, T, IC);
++        struct ggml_tensor * vb = cases[c].bias
++            ? ggml_new_tensor_1d(t.ctx, GGML_TYPE_F32, OC) : NULL;
++        struct ggml_tensor * rr = cases[c].res
++            ? ggml_new_tensor_2d(t.ctx, GGML_TYPE_F32, OL, OC) : NULL;
++
++        float * pa = (float *)malloc(ggml_nbytes(a));
++        float * pb = (float *)malloc(ggml_nbytes(b));
++        float * pvb = vb ? (float *)malloc(ggml_nbytes(vb)) : NULL;
++        float * prr = rr ? (float *)malloc(ggml_nbytes(rr)) : NULL;
++        for (int i = 0; i < (int)ggml_nelements(a); i++) pa[i] = (float)((i*7 + (int)c) % 13) * 0.25f - 1.0f;
++        for (int i = 0; i < (int)ggml_nelements(b); i++) pb[i] = (float)((i*11 + (int)c*3) % 17) * 0.2f - 1.5f;
++        if (pvb) for (int i = 0; i < OC; i++) pvb[i] = (float)((i*5) % 7) * 0.5f - 1.0f;
++        if (prr) for (int i = 0; i < (int)ggml_nelements(rr); i++) prr[i] = (float)((i*3 + 2) % 11) * 0.3f - 1.5f;
++
++        struct ggml_tensor * r;
++        if (cases[c].res || cases[c].fused_io) {
++            r = ggml_conv_direct_1d_fused(t.ctx, a, b, vb, rr, pad, dil, cases[c].slope,
++                                          cases[c].in_scale, cases[c].in_slope);
++        } else {
++            r = ggml_conv_direct_1d(t.ctx, a, b, vb, pad, dil, cases[c].slope);
++        }
++        CHECK((int)r->ne[0] == OL && (int)r->ne[1] == OC,
++              "shape (case %zu): got [%lld,%lld] want [%d,%d]",
++              c, (long long)r->ne[0], (long long)r->ne[1], OL, OC);
++
++        if (!tctx_alloc_graph(&t, r, NULL)) {
++            free(pa); free(pb); free(pvb); free(prr); tctx_end(&t); continue;
++        }
++        tctx_upload(&t, a, pa);
++        tctx_upload(&t, b, pb);
++        if (vb) tctx_upload(&t, vb, pvb);
++        if (rr) tctx_upload(&t, rr, prr);
++        tctx_compute(&t);
++
++        float * out = (float *)malloc(ggml_nbytes(r));
++        tctx_download(&t, r, out);
++
++        float * ref = (float *)malloc((size_t)OL * OC * sizeof(float));
++        ref_conv_direct_1d(pa, pb, pvb, prr, K, IC, OC, T, pad, dil,
++                           cases[c].slope, cases[c].in_scale, cases[c].in_slope, ref, OL);
++        CHECK(vec_close(out, ref, OL*OC, 1e-4f),
++              "conv_direct_1d differs (case %zu: OC%d IC%d K%d p%d d%d bias%d res%d io%d)",
++              c, OC, IC, K, pad, dil, cases[c].bias, cases[c].res, cases[c].fused_io);
++
++        free(pa); free(pb); free(pvb); free(prr); free(out); free(ref);
++        tctx_end(&t);
++    }
++    printf("  done (%d failures so far)\n", failures);
++}
++
++// ---------- 6. add_leaky_relu ----------
++
++static void test_add_leaky_relu(void) {
++    printf("[test] add_leaky_relu vs add + leaky_relu (broadcast and rowwise bias)\n");
++
++    struct {
++        int T, C;
++        float slope;
++        int rowwise;   // 0: bias [1, C] broadcast; 1: bias [T, C] elementwise
++    } cases[] = {
++        {37, 16,  0.1f, 0},
++        {37, 16,  0.1f, 1},
++        {25, 5,   0.1f, 0},   // C < nth / odd shapes (flat fallback path)
++        {25, 5,   0.1f, 1},
++        {64, 128, 0.01f, 0},
++        {64, 128, 0.01f, 1},
++        {61, 33,  0.1f, 0},   // odd C, odd T
++        {61, 33,  0.1f, 1},
++    };
++
++    for (size_t c = 0; c < sizeof(cases)/sizeof(cases[0]); c++) {
++        const int T = cases[c].T, C = cases[c].C;
++        struct tctx t;
++        tctx_begin(&t);
++
++        struct ggml_tensor * a = ggml_new_tensor_2d(t.ctx, GGML_TYPE_F32, T, C);
++        struct ggml_tensor * b = cases[c].rowwise
++            ? ggml_new_tensor_2d(t.ctx, GGML_TYPE_F32, T, C)
++            : ggml_new_tensor_2d(t.ctx, GGML_TYPE_F32, 1, C);
++
++        float * pa = (float *)malloc(ggml_nbytes(a));
++        float * pb = (float *)malloc(ggml_nbytes(b));
++        for (int i = 0; i < (int)ggml_nelements(a); i++) pa[i] = (float)((i*7 + (int)c) % 13) * 0.3f - 1.8f;
++        for (int i = 0; i < (int)ggml_nelements(b); i++) pb[i] = (float)((i*5 + 1) % 9) * 0.4f - 1.6f;
++
++        // fused op and the composed stock path, same graph
++        struct ggml_tensor * r1 = ggml_add_leaky_relu(t.ctx, a, b, cases[c].slope);
++        struct ggml_tensor * r2 = ggml_leaky_relu(t.ctx, ggml_add(t.ctx, a, b), cases[c].slope, false);
++
++        if (!tctx_alloc_graph(&t, r1, r2)) { free(pa); free(pb); tctx_end(&t); continue; }
++        tctx_upload(&t, a, pa);
++        tctx_upload(&t, b, pb);
++        tctx_compute(&t);
++
++        float * o1 = (float *)malloc(ggml_nbytes(r1));
++        float * o2 = (float *)malloc(ggml_nbytes(r2));
++        tctx_download(&t, r1, o1);
++        tctx_download(&t, r2, o2);
++
++        // exact expression contract: (v>0?v:0) + s*(v<0?v:0)
++        float * ref = (float *)malloc((size_t)T * C * sizeof(float));
++        for (int ic = 0; ic < C; ic++) {
++            for (int it = 0; it < T; it++) {
++                const size_t i = (size_t)ic*T + it;
++                const float v = pa[i] + (cases[c].rowwise ? pb[i] : pb[ic]);
++                ref[i] = (v > 0.0f ? v : 0.0f) + cases[c].slope * (v < 0.0f ? v : 0.0f);
++            }
++        }
++        CHECK(vec_close(o1, ref, T*C, 1e-5f), "add_leaky_relu differs from reference (case %zu: T%d C%d rowwise%d)",
++              c, T, C, cases[c].rowwise);
++        CHECK(vec_close(o1, o2, T*C, 1e-4f), "add_leaky_relu differs from add+leaky (case %zu: T%d C%d rowwise%d)",
++              c, T, C, cases[c].rowwise);
++
++        free(pa); free(pb); free(o1); free(o2); free(ref);
++        tctx_end(&t);
++    }
++    printf("  done (%d failures so far)\n", failures);
++}
++
++int main(int argc, char ** argv) {
++    if (argc > 1) {
++        g_backend = argv[1];
++    }
++    printf("== learned-ops smoke tests (backend: %s) ==\n", g_backend);
++
++    test_conv_1d_parity();
++    test_conv_transpose_1d_ext();
++    test_scatter_elements();
++    test_rel_pos_bias();
++    test_conv_direct_1d();
++    test_add_leaky_relu();
++
++    if (failures == 0) {
++        printf("\nALL PASSED\n");
++        return 0;
++    }
++    printf("\n%d FAILURES\n", failures);
++    return 1;
++}

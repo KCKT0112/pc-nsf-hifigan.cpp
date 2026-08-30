@@ -84,7 +84,7 @@ and ecosystem integration (pulled by `hifisampler`/`hachitune`).
 ### For contributors
 
 - **No quantization path** — this repository deliberately **does not quantize**: the vocoder is numerically sensitive; F16/F32 only. Future fp16 training pilots are validated torch-side first.
-- **Dependency policy** — ggml changes not accepted upstream go to `ggml-patch` (patch set), applied by consumers that enable CUDA; this repo's CPU/F16 path needs no patch.
+- **Dependency policy (D2-revised, 2026-08-30)** — ggml changes not accepted upstream go to `ggml-patch` (patch set). **Revised**: this repo's vocoder body now consumes patch-provided ops (`ggml_conv_direct_1d[_fused]`, `ggml_add_leaky_relu`), so a byte-identical snapshot of the 4 shipped patches (learned-ops / qvac / metal / vulkan-conv-direct-1d) lives in `./patches/` and is applied idempotently to the FetchContent-pulled stock ggml v0.19.0 at first configure (`cmake/ApplyGgmlPatches.cmake`). Clean checkouts build on every OS without manual steps; local pre-patched trees are detected and adopted (stamp file `.pcnsf-patches/`). See `docs/benchmarks.md` for what the patches buy.
 - **Numeric gate before commit** — run `tests/` golden comparison (`gen_hifigan_golden.py` + CTest t01/t02) before committing; wav output must match the torch reference.
 - **mininsf source sync** — source-generator changes live in `libmininsf`; this repo only consumes (FetchContent).
 

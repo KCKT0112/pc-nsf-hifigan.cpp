@@ -76,7 +76,7 @@ ggml 构建用于正确性/无 GPU/边缘场景与生态整合（被 `hifisample
 ### 贡献者
 
 - **无量化路径** — 本仓库**刻意不量化**：vocoder 对数值敏感，仅保留 F16/F32；未来 fp16 训练试点先在 torch 侧验证
-- **依赖策略** — 上游不接受的 ggml 修改 → 进 `ggml-patch`（补丁集），由启用 CUDA 的消费者应用；本仓库 CPU/F16 路径无需补丁
+- **依赖策略（D2-修订,2026-08-30）** — 上游不接受的 ggml 修改 → 进 `ggml-patch`（补丁集）。**修订**：本仓库 vocoder 主体现已消费补丁提供的新算子（`ggml_conv_direct_1d[_fused]`、`ggml_add_leaky_relu`），故 4 个已发布补丁的逐字节快照（learned-ops / qvac / metal / vulkan-conv-direct-1d）vendored 于 `./patches/`，在 FetchContent 拉取 stock ggml v0.19.0 后由 `cmake/ApplyGgmlPatches.cmake` 幂等打上。干净 checkout 全平台免手工可构建；本地已手工打过补丁的目录树会被识别并收养（stamp: `.pcnsf-patches/`)。补丁收益见 `docs/benchmarks.md`
 - **提交前过数值门槛** — 提交前跑 `tests/` golden 对比（`gen_hifigan_golden.py` + CTest t01/t02），wav 输出须与 torch 参考一致
 - **mininsf 源同步** — source generator 改动在 `libmininsf` 仓库，本仓库只消费（FetchContent）
 
