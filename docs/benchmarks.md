@@ -142,11 +142,48 @@ python cmp_align.py vk.f32
 
 ---
 
-## §6 B-HMMA 真机 spike(§5 方向 B 的实证检验 · **NO-GO 终判**)
+## 7. EP 噪声审计 + 参照系 Shift(2026-08-30 PM · N=881 664 · 双黄金帧)
 
-在 §5 听证冻结 B、§(EP 噪声审计)把 B-sim 误差判为"corr/rms 在台站内、maxabs 出格且方向正交"之后,仍按用户拍板做了真机 spike(因为微基准 lvl1 9.19 TFLOPS 投影 1.54× 快于 DML 的收益值得实证一次)。实现走 `PCNSF_BHMMA=1` 环境分支:全部 K>1 conv 改 `cast(w→f16)` + `im2col_fast_1d(src1=f32→dst=f16, ow_align=16)` + `ggml_cont(wm16)` + `ggml_mul_mat(f16×f16→f32)`,io-fusion 禁用、bias/leaky/residual 改显式节点;K=1 / OC=1 走守卫返回 fp32。**分支代码整体保留在 `stash@{0}`("BHMMA spike"),主线仍是 fp32 direct conv。**
+**动机**:"B-sim corr 0.99999969 这类低于 PR 锚点的差异,是否本来就落在两个**已接受** EP 实现(ORT CPU EP / ORT DML EP / torch CPU↔CUDA)之间的正常噪声带内?"方法:同一段 881 664 采样分别对 torch CPU golden 与 torch CUDA golden 做 offset 对齐(offset=0),对每条候选算 corr / max|Δ| / rms / p99.9;完整输出与全部 `_*.f32` 原始指针留私有工作目录,此处为精简转写。
 
-### 6.1 真机数据(RTX 2070 · ggml v0.19.0+patch4 · 881 664 采样 / 20 s 片段)
+### 7.1 CPU 黄金帧(与 §1/§6 同系)
+
+| cand@CPU golden | corr | max\|Δ\| | rms | p99.9 |
+|---|---:|---:|---:|---:|
+| ORT CPU EP | 0.9999999873 | 1.49e-04 | 9.84e-06 | 7.73e-05 |
+| **ggml-Vulkan(主线)** | **0.9999998460** | **6.13e-04** | **3.43e-05** | **1.69e-04** |
+| ORT DML EP | 0.9999969745 | 2.09e-03 | 1.52e-04 | 1.08e-03 |
+| B-weights(f16 权重仿真) | 0.9999999258 | 5.80e-04 | 2.50e-05 | 1.06e-04 |
+| B-acts(f16 激活仿真) | 0.9999997725 | 2.11e-03 | 4.17e-05 | 3.61e-04 |
+| B-both(=§6 听证行) | 0.9999996909 | 3.94e-03 | 4.92e-05 | 3.57e-04 |
+
+### 7.2 CUDA 黄金帧(参照系 Shift 要点)
+
+| cand@CUDA golden | corr | max\|Δ\| | rms | p99.9 |
+|---|---:|---:|---:|---:|
+| ORT DML EP | 0.9999998863 | 5.72e-04 | 2.95e-05 | 2.63e-04 |
+| ORT CPU EP | 0.9999978486 | 1.43e-03 | 1.28e-04 | 8.47e-04 |
+| torch CPU(黄金对换) | 0.9999978463 | 1.52e-03 | 1.28e-04 | 8.52e-04 |
+| **ggml-Vulkan(主线)** | **0.9999976269** | **1.55e-03** | **1.35e-04** | **8.84e-04** |
+| B-both(f16 仿真) | 0.9999976045 | 3.91e-03 | 1.35e-04 | 8.54e-04 |
+
+要点:CUDA 帧下"CPU 系实现簇"(torch CPU / ORT CPU / **ggml-Vulkan**) corr 紧簇在 0.9999976–0.9999979、max|Δ| 1.43e-03–1.55e-03,Vulkan 与 ORT-CPU、乃至 torch-CPU 自身等距 —— **Vulkan 的 fp32 实现质量已达 CPU 黄金同类水位**。DML@CUDA 的 0.9999998863 是该帧的**平台底**(DirectML 与 torch-CUDA golden 同族 f32 GPU 数学,共享舍入指纹),不是质量优势。**故 §6 的 DML-vs-Vulkan 精度排序必须按参照系敏感性打折读:两帧互换后 Vulkan 始终处于合法 EP 带内,与 DML 的差距属平台噪声量级。**
+
+### 7.3 B 方案误差指纹鉴定(为何"corr 已压过 DML"仍不可收)
+
+- corr / rms / p99.9:B-both@CPU 全部落在 §7.1 合法 EP 带内,corr(0.9999996909)甚至高于 DML(0.9999969745);
+- **max|Δ| = 3.94e-03,为合法 EP 带顶(DML 2.09e-03)的 1.88×,出格**;
+- 误差**方向与 EP 族正交**:err_B 对各 EP err 的互相关 ≤0.05,对 span(err_ORT-CPU, err_DML) 的投影 R²=0.0023;误差谱峰度合法 EP 27.4–39.4 dB、B 仅 19.9–21.7 dB(更白);B-weights 对 golden 呈 +0.276 系统偏置。
+
+**判定**:B 不是"更脏的 EP 随机噪声",而是**方向正交的系统性舍入误差**;DML-等价合同(corr/rms/p999 ≥ ORT-DML 且 max|Δ| ≤ 2× DML)下,max|Δ| 单项不达标、误差又不属同族 → 维持 §6 听证的不信任,并为接下来 §8 的真机 spike 给出"必须实测、不可凭仿真放行"的依据。
+
+---
+
+## 8. B-HMMA 真机 spike(§6 方向 B 的实证检验 · **NO-GO 终判**)
+
+在 §6 听证冻结 B、§7 EP 噪声审计把 B-sim 误差判为"corr/rms 在台站内、maxabs 出格且方向正交"之后,仍按用户拍板做了真机 spike(因为微基准 lvl1 9.19 TFLOPS 投影 1.54× 快于 DML 的收益值得实证一次)。实现走 `PCNSF_BHMMA=1` 环境分支:全部 K>1 conv 改 `cast(w→f16)` + `im2col_fast_1d(src1=f32→dst=f16, ow_align=16)` + `ggml_cont(wm16)` + `ggml_mul_mat(f16×f16→f32)`,io-fusion 禁用、bias/leaky/residual 改显式节点;K=1 / OC=1 走守卫返回 fp32。**分支代码整体保留在 `stash@{0}`("BHMMA spike"),主线仍是 fp32 direct conv。**
+
+### 8.1 真机数据(RTX 2070 · ggml v0.19.0+patch4 · 881 664 采样 / 20 s 片段)
 
 | 路径 | 暖机 wall(n=7 去首帧) | corr(vs CPU golden) | max\|Δ\| | rms |
 |---|---|---|---|---|
@@ -157,25 +194,25 @@ python cmp_align.py vk.f32
 
 冷启动:B 1 691.9 ms vs fp32 1 489.4 ms。精度比 DML 还差一个数量级(corr 差一位,maxabs ~7×),速度全面倒退 → **双重 NO-GO**。
 
-### 6.2 慢在哪里(per-node profile,`PCNSF_PROFILE=1`,总 9 053.5 ms / 1 185 节点)
+### 8.2 慢在哪里(per-node profile,`PCNSF_PROFILE=1`,总 9 053.5 ms / 1 185 节点)
 
 1. **IM2COL_FAST_1D f16-dst n=97 均 49.9 ms**:学到的算子补丁只优化了 f32-dst,f16-dst 落回通用 kernel;
 2. **MUL_MAT f16 n=98 均 39.9 ms**:reshape(im2col) 的布局(stride/对齐)不满足 mul_mm/mul_mm_cm2 快路径要求,落回通用标量 kernel —— 同几何、干净 contiguous 输入下微基准为 1.18 ms,**图内惩罚 34×**;
 3. conv_post(K=1 / OC=1)单发 matvec-scalar **881 ms**(守卫 path 退化成 matvec);
 4. ADD n=154 92.3 ms、CPY n=196 78.1 ms:显式 epilogue 拆点额外开销。
 
-### 6.3 五个失效原因与"B↔E 坍缩"
+### 8.3 五个失效原因与"B↔E 坍缩"
 
-要把 B 做到微基准投影水平,需要:f16-dst im2col 专用 kernel + 放开 mul_mat 对输入布局的 stride/对齐限制 + OC=1 安全的 HMMA 路径 + 图内重融合 epilogue —— **这正是 §4/§5 已经否决的"基础设施级 E 改造"本身**。B 与 E 的边界在真机上坍缩:B 只有按 E 的工程强度去做才有意义,而 E 已被否决。故 B 在三个独立层面终结:
+要把 B 做到微基准投影水平,需要:f16-dst im2col 专用 kernel + 放开 mul_mat 对输入布局的 stride/对齐限制 + OC=1 安全的 HMMA 路径 + 图内重融合 epilogue —— **这正是 §6 已经否决的"基础设施级 E 改造"本身**。B 与 E 的边界在真机上坍缩:B 只有按 E 的工程强度去做才有意义,而 E 已被否决。故 B 在三个独立层面终结:
 
-- (a) §5 听证:严格合同(≥0.9999999)下 corr 不够;
-- (b) EP 噪声审计:DML-等价合同下 corr/rms 在台站内、maxabs 1.88× 出格、误差方向与 EP 族正交(R²=0.0023);
-- (c) §6 真机:速度 2.7× 倒退 + 精度比 DML 还差一位。
+- (a) §6 听证:严格合同(≥0.9999999)下 corr 不够;
+- (b) §7 审计:DML-等价合同下 corr/rms 在台站内、maxabs 1.88× 出格、误差方向与 EP 族正交(R²=0.0023);
+- (c) §8 真机:速度 2.7× 倒退 + 精度比 DML 还差一位。
 
-### 6.4 保留资产
+### 8.4 保留资产
 
 - 微基准 `bench_mm_vk.exe` 证实 lvl1 配置在干净输入下确有 9.19 TFLOPS(>fp32 峰值 7.47,HMMA 生效)—— 说明瓶颈全在图内布局/缺 kernel,不在硅;
 - vk_shader 头以 文本形式进 git(此前阴影常量 PR 之后),`git status` 可直接看到 shader 再生成差异;
 - spike 评测脚本与数据(`work/_bhmma_prof.log` 等)留存 local notes,不入库。
 
-**终态建议(同 §5):冻结主线 fp32 direct conv;B/E 仅在 ggml 上游补齐 f16 im2col kernel 与 mul_mat 布局泛化后再议。**
+**终态建议(同 §6):冻结主线 fp32 direct conv;B/E 仅在 ggml 上游补齐 f16 im2col kernel 与 mul_mat 布局泛化后再议。**
