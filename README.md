@@ -34,17 +34,19 @@ build/bin/hifigan_cli hifigan.gguf mel.bin f0.bin out.wav
 
 ## Ecosystem positioning
 
-Full reference chain: see `ggml-patch` `docs/ECOSYSTEM.md`. Training-side
-repos never use ggml — these C++ repos exist for edge deployment.
+This repo lives in a small C++ ecosystem for DiffSinger-style edge deployment.
+Training-side repos never use ggml — these C++ repos exist for inference-only
+deployment.  The canonical upstreams are:
 
 | Repository | Component | Relationship |
 |---|---|---|
-| **pc-nsf-hifigan.cpp** | NSF-HiFiGAN vocoder (this repo) | depends on `libmininsf`; pulled by `hifisampler` as a build dependency |
-| libmininsf | mini-nsf sine source | base component (this repo's dependency) |
-| hifisampler.cpp | VR vocal remover | builds VR + vocoder |
-| hachitune.cpp | RMVPE pitch + cuFCPE | consumes `ggml-patch` `ext/rnn` |
-| ggml-patch | patch set + ext/ (no ggml fork) | ecosystem foundation |
-| game_ggml_cli | GAME (DiffSinger V3, score recognition) | independent opudep |
+| **pc-nsf-hifigan.cpp** | NSF-HiFiGAN vocoder (this repo) | Core engine; depends on `libmininsf` for the sine source |
+| [libmininsf](https://github.com/KakaruHayate/libmininsf) | mini-nsf sine source | Base component (pulled via FetchContent) |
+| [ggml-audio-patch](https://github.com/KakaruHayate/ggml-audio-patch) | ggml patch set + audio backends | Provides `ggml_conv_direct_1d`, `ADD_LEAKY_RELU`, and Vulkan/CUDA/Metal kernels consumed by this repo |
+| [game.cpp](https://github.com/KakaruHayate/game.cpp) | GAME (DiffSinger V3, score recognition) | Independent downstream that consumes this repo as a vocoder |
+
+If you are cloning this repo to build, you also need the two dependency repos
+above — see `docs/integrating_zh.md` §8 "Build from source".
 
 ## Model release
 

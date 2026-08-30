@@ -34,16 +34,16 @@ build/bin/hifigan_cli hifigan.gguf mel.bin f0.bin out.wav
 
 ## 生态定位
 
-完整引用链见 `ggml-patch` 的 `docs/ECOSYSTEM.md`。训练侧仓库不使用 ggml——这些 C++ 仓库面向端侧部署。
+本仓库属于一个面向 DiffSinger 风格端侧部署的小型 C++ 生态。训练侧仓库不使用 ggml —— 这些 C++ 仓库只做推理部署。当前上游如下：
 
 | 仓库 | 组件 | 关系 |
 |---|---|---|
-| **pc-nsf-hifigan.cpp** | NSF-HiFiGAN vocoder（本仓库） | 依赖 `libmininsf`；被 `hifisampler` 作为构建依赖拉取 |
-| libmininsf | mini-nsf 正弦源 | 基础组件（本仓库依赖） |
-| hifisampler.cpp | VR 人声分离 | 构建 VR + vocoder |
-| hachitune.cpp | RMVPE 音高 + cuFCPE | 消费 `ggml-patch` `ext/rnn` |
-| ggml-patch | 补丁集 + ext/（无 ggml fork） | 生态基础 |
-| game_ggml_cli | GAME（DiffSinger V3, score recognition） | 独立 opudep |
+| **pc-nsf-hifigan.cpp** | NSF-HiFiGAN vocoder（本仓库） | 核心引擎；依赖 `libmininsf` 提供正弦源 |
+| [libmininsf](https://github.com/KakaruHayate/libmininsf) | mini-nsf 正弦源 | 基础组件（FetchContent 自动拉取） |
+| [ggml-audio-patch](https://github.com/KakaruHayate/ggml-audio-patch) | ggml 补丁集 + 音频后端 | 提供 `ggml_conv_direct_1d`、`ADD_LEAKY_RELU` 及 Vulkan/CUDA/Metal kernel，被本仓库消费 |
+| [game.cpp](https://github.com/KakaruHayate/game.cpp) | GAME（DiffSinger V3, score recognition） | 独立下游，把本仓库当作 vocoder 拉取 |
+
+如果你克隆本仓库准备构建，还需要上面两个依赖仓库 —— 见 `docs/integrating_zh.md` §8 "从源码构建"。
 
 ## 模型发布
 
