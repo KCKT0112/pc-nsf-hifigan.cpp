@@ -21,6 +21,9 @@ An independent vocoder library for the DiffSinger `diffsinger.cpp` pipeline. Thi
 ```bash
 # 1. convert (PT checkpoint -> GGUF; needs torch + gguf)
 python converter/convert_hifigan.py --ckpt model.ckpt --config config.json --out hifigan.gguf
+# The official OpenVPI pc_nsf_hifigan_44.1k_hop512_128bin_2025.02.ckpt has
+# a built-in preset, because its release archive does not include config.json:
+python converter/convert_hifigan.py --ckpt pc_nsf_hifigan_44.1k_hop512_128bin_2025.02.ckpt --out hifigan.gguf
 
 # 2. build (see BUILDING.md)
 cmake -S . -B build -D CMAKE_BUILD_TYPE=Release

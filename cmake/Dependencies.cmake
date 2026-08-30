@@ -19,9 +19,8 @@ set(GGML_METAL           ${PCNSF_METAL}  CACHE BOOL "ggml: enable Metal"  FORCE)
 set(GGML_CUDA            ${PCNSF_CUDA}   CACHE BOOL "ggml: enable CUDA"   FORCE)
 set(GGML_VULKAN          ${PCNSF_VULKAN} CACHE BOOL "ggml: enable Vulkan" FORCE)
 
-if(APPLE AND PCNSF_METAL)
-    set(GGML_METAL_EMBED_LIBRARY OFF CACHE BOOL "ggml: embed Metal library" FORCE)
-endif()
+set(GGML_METAL_EMBED_LIBRARY ${PCNSF_METAL_EMBED_LIBRARY}
+    CACHE BOOL "ggml: embed Metal shader source" FORCE)
 
 # ggml (MIT) — tensor engine.  Pinned to v0.19.0 (matches game_ggml_cli).
 # D2-revised (2026-08-30): this repo's vocoder body now *consumes* APIs added

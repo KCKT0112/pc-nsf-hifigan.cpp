@@ -38,6 +38,10 @@ pcnsf_add_test(t01_mel_ng      test_mel_ng        test_mel.cpp)
 pcnsf_add_test(t02_mel_nvstft  test_mel_nvstft    test_mel_nvstft.cpp)
 pcnsf_add_test(t03_source      test_source        test_source.cpp)
 pcnsf_add_test(t04_gguf_meta   test_gguf_meta     test_gguf_meta.cpp)
+# Metadata tests do not exercise GPU kernels.  Force CPU before backend
+# probing so they also run in sandboxed/headless macOS environments where a
+# Metal command queue cannot be created.
+set_tests_properties(t04_gguf_meta PROPERTIES ENVIRONMENT "PCNSF_BACKEND=cpu")
 
 # optional end-to-end vocode test driven by PCNSF_MODEL_GGUF
 if(DEFINED ENV{PCNSF_MODEL_GGUF})
@@ -46,5 +50,6 @@ if(DEFINED ENV{PCNSF_MODEL_GGUF})
     target_compile_definitions(test_vocode PRIVATE
         PCNSF_MODEL_GGUF="$ENV{PCNSF_MODEL_GGUF}" PCNSF_GOLDEN_DIR="${PCNSF_GOLDEN_DIR}")
     add_test(NAME t05_vocode COMMAND test_vocode)
-    set_tests_properties(t05_vocode PROPERTIES FIXTURES_REQUIRED golden LABELS "e2e")
+    set_tests_properties(t05_vocode PROPERTIES
+        FIXTURES_REQUIRED golden LABELS "e2e" ENVIRONMENT "PCNSF_BACKEND=cpu")
 endif()

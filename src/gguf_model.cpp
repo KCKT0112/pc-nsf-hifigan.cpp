@@ -23,17 +23,23 @@ std::unique_ptr<GGUFModel> gguf_load(const std::string & path, int n_threads) {
         throw std::runtime_error("gguf_init_from_file failed: " + path);
     }
 
-    m->backend = ggml_backend_init_best();
-    if (!m->backend) {
-        throw std::runtime_error("ggml_backend_init_best failed");
-    }
-    // PCNSF_BACKEND=cpu forces the CPU backend (default init prefers Vulkan
-    // when available; both main-line paths compute in fp32).
-    if (const char * be = std::getenv("PCNSF_BACKEND"); be && std::string(be) == "cpu") {
-        ggml_backend_free(m->backend);
+    // Honour an explicit CPU request before probing the best GPU.  Besides
+    // avoiding needless GPU setup, this keeps CPU mode usable in processes
+    // that are not entitled to create a Metal command queue.
+    const char * backend_env = std::getenv("PCNSF_BACKEND");
+    if (backend_env && std::string(backend_env) == "cpu") {
         m->backend = ggml_backend_init_by_name("CPU", nullptr);
         if (!m->backend) {
             throw std::runtime_error("PCNSF_BACKEND=cpu but CPU backend init failed");
+        }
+    } else {
+        if (backend_env && *backend_env && std::string(backend_env) != "auto") {
+            throw std::runtime_error("unsupported PCNSF_BACKEND='" +
+                                     std::string(backend_env) + "' (expected auto or cpu)");
+        }
+        m->backend = ggml_backend_init_best();
+        if (!m->backend) {
+            throw std::runtime_error("ggml_backend_init_best failed");
         }
     }
     std::fprintf(stderr, "ggml backend: %s\n", ggml_backend_name(m->backend));

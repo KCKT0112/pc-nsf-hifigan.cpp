@@ -272,3 +272,25 @@ python cmp_align.py vk.f32
 ### 9.4 真相对齐:ggml worktree 谱系修正(法证)
 
 本会话发现旧 ggml worktree 谱系(`fd606d4` 系)只含补丁一内容 + 未入库的补丁四变体,长期缺失仓库补丁二/三的全部文件(CPU `ops.cpp` 478 行等 + 5 个 Vulkan shader + Metal 集成);此前全部存档数字即在该树上测得。已将该树保留为 `pre-canonical-backup`,主 worktree 重置到规范提交栈(补丁 1–4 = `57bf852`,+补丁五 = `b899edd`),并以差分证明缺失内容对本图是死代码:**声码器图不含任何 qvac 算子/Metal 组件,因此 §1/§6/§7/§8 全部存档数字与结论依然有效可比**(本节 9.2 的同位重测亦证实数值逐位一致)。
+
+## 10. Apple Metal 真机适配与基准（2026-08-31）
+
+环境：Apple M4、macOS 27.0、AppleClang 21、ggml v0.19.0 + 本仓五枚补丁、F32 GGUF。模型来自 OpenVPI `pc_nsf_hifigan_44.1k_hop512_128bin_2025.02.ckpt`；转换所得 GGUF SHA-256 为 `650471e4a75f782132822e622e2d0e9c5f2a1f4ae4d5ad7cf02b3ac830fcbe67`。输入为 1722 帧（输出 881664 采样，19.992 s）的同一用户音频前端结果。
+
+适配前的 Apple 默认构建与运行均不成立：`GGML_METAL_EMBED_LIBRARY=OFF` 要求额外安装 Xcode Metal Toolchain；改为嵌入 shader 后，运行又在 `IM2COL_FAST_1D` 被 Metal `supports_op` 拒绝并 abort。现已默认嵌入 shader，并把该算子映射到与普通 `IM2COL` 相同的 Metal kernel。Apple ARM64 CPU 同时避开仅 AVX2 优化、其余架构为标量回退的 `CONV_DIRECT_1D`，改走 im2col + mul_mat。
+
+| 后端 | `hifigan_run` | RTF | 相对实时 | 说明 |
+|---|---:|---:|---:|---|
+| CPU，8 线程，修正 ARM64 门控 | 中位 **12.531 s**（n=4：12.582 / 12.480 / 12.591 / 12.265） | 0.627 | 1.60× | 模型单次加载、连续 4 次 |
+| Metal，Apple M4 | **6.828–8.911 s** | 0.342–0.446 | 2.24–2.93× | 独立进程正常机器状态；极端压力后的热降频数据不混入 |
+
+按同批 CPU 中位数，Metal 加速为 **1.41–1.84×**。0.372 s 短样本在模型单次加载后连续 4 次为 102.5 / 98.9 / 98.0 / 96.5 ms，验证重复调用可用。嵌入 shader 的全新首次运行时编译在本机曾为 7.815 s；系统缓存热后库加载为 9–46 ms，因此部署侧应区分首次启动与图执行。
+
+精度（同一 881664 采样，对本机 PyTorch CPU 参考）：
+
+| 后端 | corr | max\|Δ\| | RMS Δ | p99.9\|Δ\| |
+|---|---:|---:|---:|---:|
+| ggml CPU | 0.999999999999 | 3.177e-06 | 1.100e-07 | 7.674e-07 |
+| Metal | 0.999999287801 | 3.794e-03 | 9.903e-05 | 1.094e-03 |
+
+Metal 多次独立进程输出 SHA-256 均为 `d5f365f189c90fb0ccad339e3a7c196d3de016b3b959c886e5afa57335ad94e8`，结果确定且全部有限。关闭 Metal fast-math 会使 20 s 样本超过 16 分钟仍未完成，故维持 ggml 默认数学模式；Metal 是 GPU EP 级近似，不宣称 CPU bit-exact。

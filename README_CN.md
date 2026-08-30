@@ -21,6 +21,9 @@
 ```bash
 # 1. 转换（PT checkpoint -> GGUF；需 torch + gguf）
 python converter/convert_hifigan.py --ckpt model.ckpt --config config.json --out hifigan.gguf
+# OpenVPI 官方 pc_nsf_hifigan_44.1k_hop512_128bin_2025.02.ckpt 的发布包
+# 不含 config.json，转换器已内置该版本参数：
+python converter/convert_hifigan.py --ckpt pc_nsf_hifigan_44.1k_hop512_128bin_2025.02.ckpt --out hifigan.gguf
 
 # 2. 构建（见 BUILDING.md）
 cmake -S . -B build -D CMAKE_BUILD_TYPE=Release

@@ -6,12 +6,14 @@ All dependencies are fetched by CMake (FetchContent); no manual third-party inst
 
 | Component | Source | Version |
 |---|---|---|
-| ggml | https://github.com/ggerganov/ggml | v0.11.0 (pin) |
+| ggml | https://github.com/ggerganov/ggml | v0.19.0 (pin) |
 | libmininsf | KakaruHayate/libmininsf | main |
 | pocketfft | mreineck/pocketfft | cpp pin |
 | dr_libs (dr_wav) | mackron/dr_libs | master pin |
 
-> Patch policy: this repository **does not maintain a ggml fork**; patches not accepted upstream go to `KakaruHayate/ggml-patch`, applied by consumers that enable CUDA. The CPU/F16 path needs no patch (see docs/hifigan.md).
+> Patch policy: this repository does not maintain a ggml fork. The pinned stock
+> ggml source is patched during FetchContent from the snapshots in `patches/`;
+> this supplies the learned audio ops and their CPU/Vulkan/Metal integration.
 
 ## Steps
 
@@ -29,9 +31,14 @@ cmake --build build --config Release -j
 | `PCNSF_CUDA` | OFF | CUDA backend |
 | `PCNSF_VULKAN` | OFF | Vulkan backend |
 | `PCNSF_METAL` | OFF (Apple: ON) | Metal backend (auto on Apple) |
+| `PCNSF_METAL_EMBED_LIBRARY` | OFF (Apple: ON) | Embed Metal shader source so the separate Xcode Metal Toolchain is not required; set OFF for a precompiled `default.metallib` |
 | `PCNSF_BUILD_CLI` | ON | hifigan_cli |
 | `PCNSF_BUILD_TESTS` | ON | golden comparison tests (needs Python3 + numpy) |
 | `PCNSF_BUILD_EXAMPLES` | OFF | examples/external_consumer |
+
+At runtime, `PCNSF_BACKEND=cpu` forces the CPU backend before any GPU is
+initialized. With the variable unset (or set to `auto`), ggml selects the best
+available backend; on Apple Silicon builds this is Metal.
 
 ## Vulkan / CUDA
 
@@ -39,6 +46,15 @@ Libraries and executables auto-detect and link. Runtime requirements:
 
 - Vulkan: a Vulkan-capable GPU driver; the < 1 GB net buffer requirement fits default single-GPU memory (this vocoder peaks far below 1 GB).
 - CUDA: this repo does not carry ggml-patch's CUDA kernels itself; when enabling CUDA, verify the target platform has the `ggml-patch` conv_transpose_1d fix applied, otherwise results may be inaccurate.
+
+## Metal
+
+On Apple platforms, Metal and embedded shader source are enabled by default. This
+build only needs the Metal framework included with macOS/Xcode; ggml compiles the
+embedded source through the Metal runtime on first use. To precompile
+`default.metallib` at build time instead, configure with
+`-DPCNSF_METAL_EMBED_LIBRARY=OFF`; that mode requires Xcode's separately
+downloadable Metal Toolchain (`xcodebuild -downloadComponent MetalToolchain`).
 
 ## Tests
 

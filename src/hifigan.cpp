@@ -84,7 +84,9 @@ inline bool fused_site_conv(const GGUFModel & m, char site) {
 
 // Direct fused conv (ggml-audio-patch CONV_DIRECT_1D): packs the kernel and
 // runs output tiles with no im2col buffer; the bias add (and the leaky
-// that follows convs1) fold into the epilogue.  CPU + Vulkan + F32 line.
+// that follows convs1) fold into the epilogue.  AVX2 CPU + Vulkan + F32 line.
+// The CPU kernel's non-AVX2 implementation is a correctness-only scalar
+// fallback, so ARM64 defaults to im2col + mul_mat instead.
 // The Vulkan CONV_DIRECT_1D shader is an F32 implicit GEMM (mul_mm SIMT
 // class) that also folds bias/residual/leaky in the epilogue.
 // PCNSF_DIRECT_CONV=0 falls back to the im2col path for A/B.
@@ -93,8 +95,9 @@ inline bool use_direct_conv(const GGUFModel & m, ggml_type ctype) {
     if (v) return v[0] != '0';
     if (ctype != GGML_TYPE_F32) return false;
     const char * backend_name = ggml_backend_name(m.backend);
-    return backend_name && (std::strcmp(backend_name, "CPU") == 0 ||
-                            std::strstr(backend_name, "Vulkan") != nullptr);
+    if (!backend_name) return false;
+    if (std::strstr(backend_name, "Vulkan") != nullptr) return true;
+    return std::strcmp(backend_name, "CPU") == 0 && ggml_cpu_has_avx2();
 }
 
 // The Vulkan conv_direct_1d shader (vulkan-shaders/conv_direct_1d.comp:78-84)
