@@ -20,10 +20,10 @@
 | **ggml Vulkan（补丁四，全卷积过 `supports_op`）** | **433.2–435.0 ms** | `build-vk` 姿态，见 §3；历史上限值 |
 | ggml Vulkan，同二进制清理调试钩子后复测 | 458.4–478.8 ms | 输出与清理前逐位一致（MD5 同）、SPIR-V 未变；记入偶发整机负载噪声，本文采用 **≈430–480 ms** 区间话术 |
 | ggml Vulkan，全部卷积强制回落 CPU（`PCNSF_DIRECT_MIN_K` 实验姿态） | 571–581 ms | 精度 0.99999956，验证回落路径正确 |
-| ONNX Runtime CPU EP（fp32，`onnxruntime` 1.23.0） | 5 155.0 ms | `work/bench_ort.py`（资产不入库） |
-| ONNX Runtime DML EP（fp32） | 325.8 ms | 同上 |
+| ONNX Runtime CPU EP（fp32，`onnxruntime` 1.23.0） | 4 723.8 ms（n=10，2026-08-30 下午重锚；同日上午锚为 5 155.0 ms，±8% 属本机时段漂移，引用须注明时刻） | `work/bench_ort.py`（资产不入库） |
+| ONNX Runtime DML EP（fp32） | 281.6 ms（同上重锚；上午锚 325.8 ms） | 同上 |
 
-诚实陈述：CPU 默认姿态 **4 430.9 ms @ HF_THREADS=24** 已**反超 ONNX Runtime CPU EP（5 155 ms）1.16×**（精度同档 corr ≥ 0.99999997，见 §2），即本仓库 CPU 性能已达成"与 ORT CPU EP 持平"目标；DML 目标（≤340 ms）仍是 GPU 侧的课题，CPU 暂时不追。**errata-v2（2026-08-30）**：本文档此前引用的 28 030 / 23 651 ms（T24）为**早前一次失真测量链**（当时 `_deps/ggml-src` 处于补丁 regen 前后模板状态，timing 与后来干净复测不一致，按"同一源码+同一 env 必须可复现"原则全行废弃）；更早 ggml-audio-patch 提交 `5f6becc` 自述的 "4764 ms (fused) 系（`HF_THREADS=24` 近档）"才是真正口径，今日在 rebuilt 同源码 exe 上复现为 4 405~4 435 ms（中位 4 430.9），`cmp_align.py` offset=0、corr=0.99999999、maxabs=1.4918e-04，均与 5f6becc 提交信息自报一致。
+诚实陈述：CPU 默认姿态 **4 430.9 ms @ HF_THREADS=24** 已**反超 ONNX Runtime CPU EP**：对同日下午重锚 4 723.8 ms 约 **1.05×**（对同日上午旧锚 5 155.0 ms 为 1.16×，比例随机器时段漂移，方向不变）（精度同档 corr ≥ 0.99999997，见 §2），即本仓库 CPU 性能已达成"与 ORT CPU EP 持平"目标；DML 目标（≤340 ms）仍是 GPU 侧的课题，CPU 暂时不追。**errata-v2（2026-08-30）**：本文档此前引用的 28 030 / 23 651 ms（T24）为**早前一次失真测量链**（当时 `_deps/ggml-src` 处于补丁 regen 前后模板状态，timing 与后来干净复测不一致，按"同一源码+同一 env 必须可复现"原则全行废弃）；更早 ggml-audio-patch 提交 `5f6becc` 自述的 "4764 ms (fused) 系（`HF_THREADS=24` 近档）"才是真正口径，今日在 rebuilt 同源码 exe 上复现为 4 405~4 435 ms（中位 4 430.9），`cmp_align.py` offset=0、corr=0.99999999、maxabs=1.4918e-04，均与 5f6becc 提交信息自报一致。
 
 ### 1.1 CPU 线程扩展矩阵（同 binary 交错 A/B 干净重测，2026-08-30）
 
@@ -46,6 +46,19 @@
 ### 1.2 CPU 内核 cache-blocking 旋钮扫描（实验态，2026-08-30)
 
 绑定：同上 exe（12:12:46），实验 env `GGML_CONV_TSB`(t-superblock 上限，默认 32)/`GGML_CONV_OSB_KB`（打包 Wt 每片字节上限 KB，默认 128)/`GGML_CONV_ORDER`（超块遍历序，0=t-outer / 1=oc-outer)。扫描 3×4×3×2 = 48 组（TSB ∈ {1,2,4,32} × OSB_KB ∈ {32,64,128} × ORDER ∈ {0,1} × 线程 ∈ {12,16})，每组 n=1:**全部输出与默认姿态 MD5 逐位一致**（参见 `_sweep_logs/_anchor.txt`);wall 范围 5 405~6 371 ms(T12 与 T16 合并）,**组内任一轴单调性差 ≤ 2%**（整组散布为噪声）。判读：当前 kernel 的 cache-blocking 已达饱和，没有可信增益空间；后续若要再压 CPU 时间，方向在"减少 152 节点的 barrier/pack 固定开销"而不是"调 superblock 尺寸"。**按泛用性听证约定：没有可信正效应 → 不改热循环。**
+
+### 1.3 独立可复现性验证（全新 sandbox 构建，2026-08-30 下午）
+
+目的：证明"从仓库声明的源状态出发、不经手任何既有构建产物"即可复现本文档的 CPU 主张。步骤：新建构建目录 → 按 `build-cpu` 的 CMakeCache 签名配置（VS2019 x64，仅 CPU，CPU-only）→ FetchContent 拉取**未打补丁的 stock ggml v0.19.0**（`30bf868`）→ `git apply` ggml-audio-patch 的 `learned-ops-ggml0190.patch`（rc=0，仅补丁一，CPU 路径）→ Release 全量编译。结果：
+
+| 判据 | 结果 | 对照 |
+|---|---|---|
+| 输出位等价 | `HF_RAW_OUT` f32 MD5 与 §1.2 门锚**逐位一致** | MD5 同锚 |
+| 精度 | offset=0，corr=0.99999999，maxabs=1.4918e-04 | 与 §2 主张一致 |
+| 性能（与同机 build-cpu 交错 A/B，各 n=3 取中位） | T24：**4 487 ms**；T16：5 963 ms | build-cpu 同测 T24 4 490 / T16 5 808 ms；差异在噪声内 |
+| 编译环境 | 两侧 ggml-cpu Release 编译旗标逐字节相同 | MSVC 14.29，/O2，/arch:AVX2 |
+
+结论：补丁库现态 payload 可从 stock v0.19.0 复现全部主张；§1.2 的实验旋钮脚手架仅存在于本机工作目录，不随 patch 分发，也不影响输出。sandbox 构建产物验证完成即删除，本节记录为其唯一存活证据（含各文件 mtime 与 MD5，见私有 ROOTCAUSE_NOTES §2.14）。
 
 ## 2. 精度（对 torch CPU golden，`cmp_align.py` offset 对齐）
 
