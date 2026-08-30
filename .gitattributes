@@ -1,0 +1,5 @@
+# Patch snapshots must check out byte-stable: git apply is line-ending
+# sensitive for context matching on heterogeneous toolchains; force LF on
+# every platform (Windows runners default to autocrlf=true).
+patches/*.patch text eol=lf
+cmake/*.cmake   text eol=lf
