@@ -93,6 +93,7 @@ git apply patches/learned-ops-ggml0190.patch            # 补丁一
 git apply patches/qvac-ops-ggml0190.patch               # 补丁二
 # git apply patches/metal-ops-ggml0190.patch            # 补丁三（Metal 可选，与补丁四正交）
 git apply patches/vulkan-conv-direct-1d-ggml0190.patch  # 补丁四
+git apply patches/vulkan-pipeline-cache-ggml0190.patch  # 补丁五（持久管线缓存；全新 GitHub clone 由 cmake/ApplyGgmlPatches.cmake 自动完成这五步，无需手敲）
 ```
 
 运行（示意为 Windows cmd 风格；资产 `hifigan_f32.gguf` / `mel.bin` / `f0.bin` / `golden_f32.bin` / `cmp_align.py` 体积原因不入库）：
@@ -216,3 +217,58 @@ python cmp_align.py vk.f32
 - spike 评测脚本与原始数据留存私有工作目录,不入库。
 
 **终态建议(同 §6):冻结主线 fp32 direct conv;B/E 仅在 ggml 上游补齐 f16 im2col kernel 与 mul_mat 布局泛化后再议。**
+
+## 9. game.cpp 三项借鉴的落地与实测(2026-08-30 晚 · 补丁五 / CPU 常驻线程池 / llamafile 阴性结果)
+
+把 game.cpp 的三件可复用资产逐项落地或否决,全部按数字纪律记录(commit SHA + CMakeCache 关键行 + 命令齐备)。
+
+### 9.1 补丁五:Vulkan 持久化磁盘管线缓存(已落地)
+
+移植 game.cpp `cmake/patches/ggml-vulkan-pipeline-cache` 至 ggml v0.19.0,作为 ggml-audio-patch 的第五个补丁(上游仓已交付 `vulkan-pipeline-cache-ggml0190.patch`;本仓 `patches/` 同步字节一致副本,`cmake/Dependencies.cmake` + `ApplyGgmlPatches.cmake` 校验并自动应用,全新 GitHub clone 构建路径已实测:5 patch 全绿、幂等重跑 5 个 skip)。
+
+环境:`build-vk` Release(MSVC 14.29,`/O2 /Ob2 /DNDEBUG`),`GGML_VULKAN=ON / GGML_AVX2=ON / GGML_CPU_REPACK=ON`,`FETCHCONTENT_SOURCE_DIR_GGML=ggml worktree @ b899edd`(= 补丁一至四栈 + 补丁五);本仓 `5c23b2d` + 本节改动;RTX 2070 驱动 32.0.16.2002;参考片段 T=1722(881 664 采样);测量 2026-08-30 16:52–16:57。
+
+| 场景 | blob 状态 | wall (ms) | `hifigan_run` (ms) |
+|---|---|---:|---:|
+| 冷(删除 blob) | 无 → 写出 334 150 B | 2 454 | 1 061.5 |
+| 热(进程重启,blob 载入) | 334 150 B | 1 120–1 295(n=4) | 346.8–355.0(n=3,首序列) |
+| `GGML_VK_DISABLE_PIPELINE_CACHE=1` | 存在未用 | 1 122–1 232 | 347.5–355.3(首序列 n=3) |
+| 独立交叉复测(同晚数分钟后) | ON / OFF 各 n=3 | ≈1 200 | ON 中位 376.1 / OFF 中位 373.1 |
+
+精度:`vk_p5.f32` / `vk_p5_w.f32` 对 torch-CPU golden corr 0.99999985、max|Δ| 6.1314e-04、offset=0 —— 与存档 Vulkan 锚点逐位同级,零数值影响。
+
+如实解读:**首跑收益真实且大**(无 blob 时编译计入首次计算:图内 1 061.5 → 稳定 ≈350 ms,≈3×;wall 2 454 → ≈1 200 ms,≈2×);但本机 NVIDIA 驱动 GLCache 也跨进程缓存编译产物,该层"热"时补丁五在稳态无可测增益(上表 ON≈OFF)。blob 的价值场景 = 驱动缓存冷/被逐出/容量受限/弱缓存平台。构造"驱动冷"受控 A/B 因驱动自管理 GLCache 行为未获干净对照(尝试期间逐跑散布达 ±90 ms),除首表冷行外不宣称"驱动冷"数值。完整表与复现命令见上游仓 `docs/benchmarks.md` 补丁五节。
+
+环境开关:`GGML_VK_PIPELINE_CACHE_PATH`(自定义位置,默认 `%LOCALAPPDATA%\ggml_audio_vk_pipeline.cache` / Linux `$HOME/.cache`)、`GGML_VK_DISABLE_PIPELINE_CACHE=1`、`GGML_VK_PIPELINE_CACHE_DEBUG=1`(打印载入/写回字节数,实测 334 150 B)。
+
+另注:`build-vk` 首测序列稳态读数(346.8–355.3 ms)低于 §1 存档区间 433–480 ms;同晚后续序列又回到 374–430 ms 簇 —— 属机器状态漂移而非补丁效应(补丁五不触碰 shader/算子),§1 存档数仍有效,本节附录列出全部序列供后人校准。
+
+### 9.2 CPU 后端常驻线程池(已落地,`GGUFModel` 级)
+
+参考 game.cpp `src/backend.cpp`:`ggml_threadpool_params_default(n_threads)` → `ggml_threadpool_new` → `ggml_backend_cpu_set_threadpool`,池随模型生命周期常驻(混合轮询 poll=50),析构时先于 backend 释放。收益场景为嵌入式宿主反复调用(每次省一次 16–24 线程 spawn/join);对一次性 CLI 不可见是预期内。
+
+环境:`build-cpu` Release(MSVC 14.29),`GGML_NATIVE=ON / GGML_LLAMAFILE=OFF / GGML_CPU_REPACK=ON`,ggml worktree 同上 `b899edd`;测量 2026-08-30 17:03。
+
+| 线程 | 本实现 n=3(ms) | 中位 | §1.1 存档(同机,2026-08-30 白天) |
+|---|---|---:|---:|
+| 16 | 5745.2 / 5580.0 / 5632.8 | **5632.8** | 5526.9 |
+| 24 | 4578.1 / 4522.9 / 4789.4 | **4578.1** | 4430.9 |
+
+精度 corr 0.99999999、max|Δ| 1.4918e-04 —— 与存档 CPU 锚点逐位同级。结论:时序与精度均在漂移带内持平(线程池改动对单次 CLI 中性),行为无回归;同时本次重建也顺带验证了"规范补丁栈(含补丁二 CPU 内容)对我们图无可测影响"。
+
+### 9.3 GGML_LLAMAFILE sgemm:实测无差异 → **不启用**(保持 OFF)
+
+分析:ggml `forward_mul_mat` 在 src1 连续或臂内转换路径上有两处 `llamafile_sgemm` 调用,兜底 `goto UseGgmlGemm1`;tinyBLAS 门控要求 `k % 8 == 0` 且 `m % 4 == 0`(AVX2 f32),`n < 2` 直接退回。本图 MUL_MAT 的 m 为输出通道侧(含 conv_post 的 OC=1),多数落在门控之外。
+
+实测(同一 `build-cpu` 目录翻转 `-DGGML_LLAMAFILE=ON` 重链,仅 `ggml-cpu.dll` 变化;测量 2026-08-30 17:05,环境同 §9.2):
+
+| 线程 | llamafile OFF 中位(17:03) | llamafile ON n=3(ms) | ON 中位 |
+|---|---:|---|---:|
+| 24 | 4578.1 | 4521.0 / 4496.5 / 4534.3 | 4521.0 |
+| 16 | 5632.8 | 5722.0 / 5620.2 / 5794.6 | 5722.0 |
+
+精度:ON 下 corr 0.99999999、max|Δ| **1.4918e-04 与 OFF 完全相同**(七位有效数字)——说明本图内 sgemm 快路径实际未被触发(若触发,f32 累加分块顺序不同几乎必然产生非零微差),全部落回 ggml 默认 GEMM。零收益 + 无法触发的死路径 = 维持默认 OFF,已回退并重建验证(4529.3 ms @ T24,corr 不变)。`build-vk` 缓存里历史上带着 `GGML_LLAMAFILE=ON`(该构造的 CPU 回落后端;同样回落至默认 GEMM,无主线路径影响),存档 Vulkan 数字不带此项差异。
+
+### 9.4 真相对齐:ggml worktree 谱系修正(法证)
+
+本会话发现旧 ggml worktree 谱系(`fd606d4` 系)只含补丁一内容 + 未入库的补丁四变体,长期缺失仓库补丁二/三的全部文件(CPU `ops.cpp` 478 行等 + 5 个 Vulkan shader + Metal 集成);此前全部存档数字即在该树上测得。已将该树保留为 `pre-canonical-backup`,主 worktree 重置到规范提交栈(补丁 1–4 = `57bf852`,+补丁五 = `b899edd`),并以差分证明缺失内容对本图是死代码:**声码器图不含任何 qvac 算子/Metal 组件,因此 §1/§6/§7/§8 全部存档数字与结论依然有效可比**(本节 9.2 的同位重测亦证实数值逐位一致)。

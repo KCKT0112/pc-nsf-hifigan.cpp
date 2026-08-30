@@ -3,9 +3,10 @@
 # PATCH_COMMAND:
 #   cmake -DGGML_SOURCE_DIR=<dir> -DGGML_PATCH_1=.. [-DGGML_PATCH_2=.. ...] -P this.cmake
 #
-# Why NOT `git apply -R --check` for idempotency: the 4 patches overlap
-# contextually (e.g. the op-name table in src/ggml.c grows with each patch).
-# After applying 1..4 in order, `git apply -R --check patch_1` fails because
+# Why NOT `git apply -R --check` for idempotency: the patches overlap
+# contextually (e.g. the op-name table in src/ggml.c grows with each patch,
+# and patches 4/5 both edit src/ggml-vulkan/ggml-vulkan.cpp).
+# After applying 1..5 in order, `git apply -R --check patch_1` fails because
 # patch_2's additions sit in patch_1's context lines.  Reverse order would
 # work only as a strictly nested unwind — too fragile for a guard check.
 #
@@ -20,8 +21,9 @@
 #                                                  patched: half-state)
 #
 # Marker = a string that exists in the tree *only* if that patch was applied.
-# Markers live in include/ggml.h for patches 1/2 (API decls), and in files
-# created by patches 3/4 for the Vulkan/Metal ops.
+# Markers live in include/ggml.h for patches 1/2 (API decls), in files created
+# by patches 3/4 for the Vulkan/Metal ops, and (patch 5) in the env-var name
+# added to src/ggml-vulkan/ggml-vulkan.cpp.
 
 if(NOT DEFINED GGML_SOURCE_DIR)
     message(FATAL_ERROR "GGML_SOURCE_DIR not set")
@@ -34,7 +36,8 @@ set(_specs
     "GGML_PATCH_1|include/ggml.h|ggml_conv_direct_1d_fused"
     "GGML_PATCH_2|include/ggml.h|GGML_OP_ADD_LEAKY_RELU"
     "GGML_PATCH_3|src/ggml-metal/ggml-metal-device.cpp|kernel_supertonic_pw2_residual"
-    "GGML_PATCH_4|src/ggml-vulkan/vulkan-shaders/conv_direct_1d.comp|XS_ROWS")
+    "GGML_PATCH_4|src/ggml-vulkan/vulkan-shaders/conv_direct_1d.comp|XS_ROWS"
+    "GGML_PATCH_5|src/ggml-vulkan/ggml-vulkan.cpp|GGML_VK_PIPELINE_CACHE_PATH")
 
 set(_n_applied 0)
 set(_n_skipped 0)

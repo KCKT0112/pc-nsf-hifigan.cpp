@@ -27,7 +27,8 @@ std::unique_ptr<GGUFModel> gguf_load(const std::string & path, int n_threads) {
     if (!m->backend) {
         throw std::runtime_error("ggml_backend_init_best failed");
     }
-    // PCNSF_BACKEND=cpu forces the CPU backend (Vulkan/others may use fp16 math).
+    // PCNSF_BACKEND=cpu forces the CPU backend (default init prefers Vulkan
+    // when available; both main-line paths compute in fp32).
     if (const char * be = std::getenv("PCNSF_BACKEND"); be && std::string(be) == "cpu") {
         ggml_backend_free(m->backend);
         m->backend = ggml_backend_init_by_name("CPU", nullptr);
@@ -38,6 +39,18 @@ std::unique_ptr<GGUFModel> gguf_load(const std::string & path, int n_threads) {
     std::fprintf(stderr, "ggml backend: %s\n", ggml_backend_name(m->backend));
     if (ggml_backend_is_cpu(m->backend)) {
         ggml_backend_cpu_set_n_threads(m->backend, n_threads);
+        // Persistent threadpool (pattern from KakaruHayate/game.cpp
+        // src/backend.cpp): without it, every graph_compute spawns and joins
+        // n_threads fresh std::threads (~1-3 ms round-trip at 16 threads),
+        // which dominates short repeated invocations in embedding hosts.
+        // Default params give hybrid polling (poll=50): workers stay warm
+        // across this model's many small ops without a pure busy-wait.
+        struct ggml_threadpool_params tpp = ggml_threadpool_params_default(n_threads);
+        m->tpool = ggml_threadpool_new(&tpp);
+        if (!m->tpool) {
+            throw std::runtime_error("ggml_threadpool_new failed");
+        }
+        ggml_backend_cpu_set_threadpool(m->backend, m->tpool);
     }
 
     const int n = gguf_get_n_tensors(m->gguf);

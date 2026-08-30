@@ -174,8 +174,11 @@ C# 侧把 `float[]` 固定后传入，或改用 `SafeBuffer` / `Span<float>`（.
 | `HF_RAW_OUT` | 路径 | 关 | 额外把裸 f32 波形写到该路径（供 cmp 比对） |
 | `PCNSF_BACKEND` | `cpu` | — | 强制 CPU 后端（默认 `ggml_backend_init_best()`）；进 debug / 非 GPU 环境用 |
 | `GGML_VK_DISABLE_COOPMAT2` | `1` | 1（CLI 自动设） | Vulkan 上关张量核 fp16 舍入（fp32 合同）；留空又走库外则须自理 |
+| `GGML_VK_PIPELINE_CACHE_PATH` | 路径 | 用户缓存目录 | Vulkan 管线缓存 blob 位置（默认 `%LOCALAPPDATA%\ggml_audio_vk_pipeline.cache`，Linux `$HOME/.cache/`）；补丁五提供，见 `benchmarks.md` §9.1 |
+| `GGML_VK_DISABLE_PIPELINE_CACHE` | `1` | 关 | 彻底关闭管线磁盘缓存（首跑/驱动更新后需重编译全部管线，约多花 1 s 启动） |
+| `GGML_VK_PIPELINE_CACHE_DEBUG` | `1` | 关 | 打印缓存载入/写回字节数（引擎排障用） |
 
-> 引擎级调试开关（`PCNSF_TIMING` / `PCNSF_PROFILE` / `PCNSF_FUSED_ADD` / `PCNSF_DIRECT_MIN_K` 等）面向引擎开发，不是输入契约，量产接入不应设。
+> 引擎级调试开关（`PCNSF_TIMING` / `PCNSF_PROFILE` / `PCNSF_FUSED_ADD` / `PCNSF_DIRECT_MIN_K` / `GGML_VK_PIPELINE_CACHE_DEBUG` 等）面向引擎开发，不是输入契约，量产接入不应设。
 
 ## 7. 性能数量级（部署先有一个数感）
 

@@ -1,9 +1,12 @@
 #pragma once
 
 // GGUF model loading (weights in meta context) + backend setup.
-// Wraps ggml v0.11.0: gguf_init_from_file -> tensors in a ggml context,
+// Wraps ggml v0.19.0: gguf_init_from_file -> tensors in a ggml context,
 // compute backend (CPU by default; GPU backends upload weights via
 // ggml_backend_tensor_alloc/set so device shaders never read CPU memory).
+// CPU backends additionally get a persistent threadpool (created once at
+// load, reused by every graph_compute) so per-call thread spawn cost is
+// paid once instead of on every run.
 
 #include <ggml.h>
 #include <ggml-backend.h>
@@ -23,10 +26,12 @@ struct GGUFModel {
     ggml_context * meta   = nullptr;
     ggml_backend_t backend = nullptr;
     ggml_backend_buffer_t buf = nullptr;
+    ggml_threadpool_t tpool = nullptr;  // CPU backends only; borrowed by backend
     std::unordered_map<std::string, ggml_tensor *> tensors;
 
     ~GGUFModel() {
         if (buf)    ggml_backend_buffer_free(buf);
+        if (tpool)  ggml_threadpool_free(tpool);  // before backend: pool threads must not outlive backend use
         if (backend) ggml_backend_free(backend);
         if (gguf)   gguf_free(gguf);
         if (meta)   ggml_free(meta);

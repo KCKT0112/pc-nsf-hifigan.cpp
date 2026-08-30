@@ -28,7 +28,7 @@ endif()
 # by KakaruHayate/ggml-audio-patch (ggml_conv_direct_1d / *_fused /
 # ggml_add_leaky_relu).  "No patches applied here" was true when hifigan.cpp
 # was I/O-only; it is false now.  We vendor a byte-identical snapshot of the
-# 4 shipped patches into ./patches/ and have FetchContent apply them
+# 5 shipped patches into ./patches/ and have FetchContent apply them
 # idempotently on first populate.  Keeping them as files (not a ggml fork)
 # preserves the D2 intent: ggml remains stock upstream, the diff lives here.
 #
@@ -41,9 +41,10 @@ set(_pcnsf_ggml_patch_1 "${_pcnsf_ggml_patch_dir}/learned-ops-ggml0190.patch")
 set(_pcnsf_ggml_patch_2 "${_pcnsf_ggml_patch_dir}/qvac-ops-ggml0190.patch")
 set(_pcnsf_ggml_patch_3 "${_pcnsf_ggml_patch_dir}/metal-ops-ggml0190.patch")
 set(_pcnsf_ggml_patch_4 "${_pcnsf_ggml_patch_dir}/vulkan-conv-direct-1d-ggml0190.patch")
-foreach(_p IN ITEMS "${_pcnsf_ggml_patch_1}" "${_pcnsf_ggml_patch_2}" "${_pcnsf_ggml_patch_3}" "${_pcnsf_ggml_patch_4}")
+set(_pcnsf_ggml_patch_5 "${_pcnsf_ggml_patch_dir}/vulkan-pipeline-cache-ggml0190.patch")
+foreach(_p IN ITEMS "${_pcnsf_ggml_patch_1}" "${_pcnsf_ggml_patch_2}" "${_pcnsf_ggml_patch_3}" "${_pcnsf_ggml_patch_4}" "${_pcnsf_ggml_patch_5}")
     if(NOT EXISTS "${_p}")
-        message(FATAL_ERROR "ggml patch snapshot missing: ${_p} — regenerate from KakaruHayate/ggml-audio-patch @ 55c9389")
+        message(FATAL_ERROR "ggml patch snapshot missing: ${_p} — sync the vendored snapshot from KakaruHayate/ggml-audio-patch (patches/)")
     endif()
 endforeach()
 
@@ -54,7 +55,7 @@ FetchContent_Declare(
     GIT_SHALLOW    TRUE
     # NOTE: pass each patch as its own -D.  A ;-separated list inside one -D
     # would be re-split when ExternalProject materialises PATCH_COMMAND into
-    # its subbuild script, silently dropping patches 2..4.  Enumerated vars
+    # its subbuild script, silently dropping patches 2..5.  Enumerated vars
     # are immune to that.
     PATCH_COMMAND  ${CMAKE_COMMAND}
                    -DGGML_SOURCE_DIR=<SOURCE_DIR>
@@ -62,6 +63,7 @@ FetchContent_Declare(
                    "-DGGML_PATCH_2=${_pcnsf_ggml_patch_2}"
                    "-DGGML_PATCH_3=${_pcnsf_ggml_patch_3}"
                    "-DGGML_PATCH_4=${_pcnsf_ggml_patch_4}"
+                   "-DGGML_PATCH_5=${_pcnsf_ggml_patch_5}"
                    -P "${CMAKE_CURRENT_SOURCE_DIR}/cmake/ApplyGgmlPatches.cmake"
 )
 FetchContent_MakeAvailable(ggml)
@@ -70,6 +72,7 @@ unset(_pcnsf_ggml_patch_1)
 unset(_pcnsf_ggml_patch_2)
 unset(_pcnsf_ggml_patch_3)
 unset(_pcnsf_ggml_patch_4)
+unset(_pcnsf_ggml_patch_5)
 
 # libmininsf (MIT) — mini-nsf sine source generator.
 FetchContent_Declare(
