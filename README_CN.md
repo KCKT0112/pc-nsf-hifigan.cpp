@@ -64,12 +64,11 @@ build/bin/hifigan_cli hifigan.gguf mel.bin f0.bin out.wav
 
 ## 部署说明（速度基线 = ONNX/DML）
 
-本声码器的**高效部署路径是导出 ONNX 跑 DirectML**（`J:\0608\backend_matrix_outputs\metrics_*.md`：
-一条 20s 约 340ms，≈59x 实时）。本 ggml 引擎作为**参考 / 纯推理实现**维护——
-后端可移植（CPU/Vulkan/CUDA/Metal）、数值与 torch 一致（corr>0.9999），
-但**不是延迟基线**，不应期望它快过 ONNX/DML（差距见
-`docs/verification_real_hifigan.md`）。已定：hifigan 保持在 ONNX 上跑；
-ggml 构建用于正确性/无 GPU/边缘场景与生态整合（被 `hifisampler`/`hachitune` 拉取）。
+本声码器的**最低延迟部署路径是导出 ONNX 跑 DirectML**（20 s 音节约 282 ms，≈71× 实时，RTX 2070 级；裸基线数值见 `docs/benchmarks.md` §1）。本 ggml 引擎**不追平 ONNX 的延迟**，而是作为**参考 / 纯推理实现、后端可移植**（CPU/Vulkan/CUDA/Metal）+ **数值与 torch 参考在 EP 精度档内等价**（fp32 线路 corr 0.9999998460，合法 EP 噪声带内，双黄金帧一致）。与 DML 剩余的 ~1.5× 差距是**刻意止步、已冻结**（见 `docs/benchmarks.md` §6 终态裁决）：每再快一步，要么违反精度合同、要么落入我们不愿意持有的引擎级基建。正确性 / 可复现性 / 无 GPU 边缘场景 / 生态接入是目标；延迟追齐 ONNX/DML 不是（被 `hifisampler`/`hachitune` 拉取的方式见"生态定位"）。
+
+## 集成（典型场景：mel + f0 进,wav 出）
+
+逐帧契约、模型参数表与常见坑见 **[docs/integrating_zh.md](docs/integrating_zh.md)**（mel `[T, 128]` 自然对数 + f0 `[T]` Hz，帧按 hop=512 @ 44.1 kHz 逐帧对齐 → wav `T*512` 采样）。接入面对 `pc_nsf_hifigan::HifiganModel` + `hifigan_run`，端到端的极简模板在 `examples/external_consumer/`。
 
 ## 开发指引
 
@@ -102,4 +101,4 @@ third_party/             pocketfft_hdronly.h（vendored 单头文件）
 cmake/Dependencies.cmake 依赖管理（FetchContent）
 ```
 
-[构建](BUILDING.md) · [架构](docs/hifigan.md) · [基准实测](docs/benchmarks.md) · [测试](tests/README.md)
+[构建](BUILDING.md) · [架构](docs/hifigan.md) · [基准实测](docs/benchmarks.md) · [集成](docs/integrating_zh.md) · [测试](tests/README.md)

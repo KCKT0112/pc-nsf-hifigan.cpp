@@ -69,15 +69,27 @@ tier.
 
 ## Deployment note (speed baseline = ONNX/DML)
 
-The **efficient deployment path for this vocoder is the ONNX export running on
-DirectML** (`J:\0608\backend_matrix_outputs\metrics_*.md`: ~340 ms for a 20 s
-clip, about 59× realtime).  This ggml engine is maintained as the **reference /
-pure-inference implementation** — it is backend-portable (CPU/Vulkan/CUDA/Metal)
-and numerically validated against torch (corr > 0.9999), but it is **not** the
-latency baseline and should not be expected to beat ONNX/DML (see
-`docs/verification_real_hifigan.md` for the measured gap).  Decision recorded:
-leave hifigan on ONNX, keep the ggml build for correctness/no-GPU/edge cases
-and ecosystem integration (pulled by `hifisampler`/`hachitune`).
+The **lowest-latency deployment path for this vocoder is an ONNX export on DirectML**
+(about 282 ms for a 20 s clip, ≈71× realtime on an RTX 2070-class GPU; the raw
+engine-to-engines number is in `docs/benchmarks.md` §1).  We invest in this ggml
+engine not to chase that latency, but to stay a **reference / pure-inference,
+backend-portable** implementation (CPU/Vulkan/CUDA/Metal) that is **numerically
+equivalent to the torch reference at the EP-precision level** — corr 0.9999998460
+on the fp32 line, inside the legitimate EP-noise band on both golden frames. The
+remaining ~1.5× gap to DML is a deliberate, investigated, **frozen** decision (see
+`docs/benchmarks.md` §6): each further speed-up either breaks the precision
+contract or sinks into infra we do not want to own. Correctness, reproducibility,
+no-GPU/edge deployment, and ecosystem integration are the goals; wall-clock parity
+with ONNX/DML is explicitly not (pulled by `hifisampler`/`hachitune`).
+
+## Integration (typical case: mel + f0 in, wav out)
+
+See **[docs/integrating_zh.md](docs/integrating_zh.md)** for the hh-typical
+contract (mel `[T, 128]` natural-log + f0 `[T]` Hz, both frame-aligned at hop=512
+@44.1 kHz → wav `T*512` samples), the adapted model's parameter table, and the
+common pitfalls (log10 vs ln, frame count mismatch, unvoiced=0). The integration
+surface is `pc_nsf_hifigan::HifiganModel` + `hifigan_run`, exercised end-to-end by
+`examples/external_consumer/`.
 
 ## Development guide
 
@@ -110,4 +122,4 @@ third_party/             pocketfft_hdronly.h (vendored single header)
 cmake/Dependencies.cmake dependency management (FetchContent)
 ```
 
-[Building](BUILDING.md) · [Architecture](docs/hifigan.md) · [Benchmarks](docs/benchmarks.md) · [Tests](tests/README.md)
+[Building](BUILDING.md) · [Architecture](docs/hifigan.md) · [Benchmarks](docs/benchmarks.md) · [Integration](docs/integrating_zh.md) · [Tests](tests/README.md)

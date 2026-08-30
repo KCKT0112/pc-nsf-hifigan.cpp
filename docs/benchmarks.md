@@ -123,7 +123,7 @@ python cmp_align.py vk.f32
 
 ## 6. 终态裁决（2026-08-30）：Vulkan↔DML 差距取舍已定性、刻意止步
 
-剩余 ~1.5× 差距（Vulkan 430–480 ms 对本文重锚 ORT DML EP **281.6 ms**，同会话 n=10）做过系统勘察，结论为**不再继续**：每条提速路线要么违反数值合同、要么属于本仓库无意持有的引擎级基建。
+剩余 ~1.5× 差距（Vulkan 430–480 ms 对本文重锚 ORT DML EP **281.6 ms**，2026-08-30 同批次计时 n=10）做过系统勘察，结论为**不再继续**：每条提速路线要么违反数值合同、要么属于本仓库无意持有的引擎级基建。
 
 - **f16 张量核 GEMM**（算力余量唯一够的路线，im2col + `KHR_cooperative_matrix`，f16 操作数 f32 累加）以 torch 侧模拟取证——把全部 Conv1d 的操作数过一道 f16 舍入再以 fp32 前向（HMMA 的 f16×f16 乘积在 f32 中精确、累加 f32，该模拟即其忠实上界，93 个 Conv1d 全覆盖）：
 
@@ -213,6 +213,6 @@ python cmp_align.py vk.f32
 
 - 微基准 `bench_mm_vk.exe` 证实 lvl1 配置在干净输入下确有 9.19 TFLOPS(>fp32 峰值 7.47,HMMA 生效)—— 说明瓶颈全在图内布局/缺 kernel,不在硅;
 - vk_shader 头以 文本形式进 git(此前阴影常量 PR 之后),`git status` 可直接看到 shader 再生成差异;
-- spike 评测脚本与数据(`work/_bhmma_prof.log` 等)留存 local notes,不入库。
+- spike 评测脚本与原始数据留存私有工作目录,不入库。
 
 **终态建议(同 §6):冻结主线 fp32 direct conv;B/E 仅在 ggml 上游补齐 f16 im2col kernel 与 mul_mat 布局泛化后再议。**
