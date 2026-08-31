@@ -154,20 +154,28 @@ int main(int argc, char** argv) {
     report.ort_threads = args.threads;
 
     bench::GgmlRunnerPtr ggml_runner;
-    try {
-        ggml_runner = bench::make_ggml_runner(args.gguf, args.threads);
-        if (!ggml_runner->valid()) {
-            throw std::runtime_error("GGUF model loaded but appears empty.");
+    if (args.backend == "both" || args.backend == "ggml") {
+        try {
+            ggml_runner = bench::make_ggml_runner(args.gguf, args.threads);
+            if (!ggml_runner->valid()) {
+                throw std::runtime_error("GGUF model loaded but appears empty.");
+            }
+        } catch (const std::exception& e) {
+            std::cerr << "GGML init failed: " << e.what() << "\n";
         }
-    } catch (const std::exception& e) {
-        std::cerr << "GGML init failed: " << e.what() << "\n";
+    } else {
+        std::cout << "ggml backend skipped (--backend " << args.backend << ")\n";
     }
 
     bench::OrtRunnerPtr ort_runner;
-    try {
-        ort_runner = bench::make_ort_runner(args.onnx, args.threads);
-    } catch (const std::exception& e) {
-        std::cerr << "ORT init failed: " << e.what() << "\n";
+    if (args.backend == "both" || args.backend == "ort") {
+        try {
+            ort_runner = bench::make_ort_runner(args.onnx, args.threads);
+        } catch (const std::exception& e) {
+            std::cerr << "ORT init failed: " << e.what() << "\n";
+        }
+    } else {
+        std::cout << "ort backend skipped (--backend " << args.backend << ")\n";
     }
 
     if (!ggml_runner && !ort_runner) {

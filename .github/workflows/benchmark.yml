@@ -227,8 +227,14 @@ jobs:
           # Executable
           if [[ "${{ matrix.config.name }}" == "Windows" ]]; then
             cp build/bin/pcnsf_benchmark.exe package/
+            # Project shared libraries (ggml-*.dll, mininsf.dll, ...) must sit
+            # next to the exe or the process fails to load (exit 127). ORT's own
+            # dlls are copied separately below.
+            cp build/bin/*.dll package/ 2>/dev/null || true
           else
             cp build/bin/pcnsf_benchmark package/
+            # Linux links ggml statically, but copy any project .so just in case.
+            cp build/bin/*.so* package/ 2>/dev/null || true
           fi
           # Model weights produced by prepare-model
           cp model/* package/ 2>/dev/null || true
