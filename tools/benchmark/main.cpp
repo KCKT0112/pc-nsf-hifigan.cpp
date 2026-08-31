@@ -27,6 +27,7 @@ namespace {
 struct Args {
     std::string gguf = "hifigan_f32.gguf";
     std::string onnx = "nsf_hifigan.onnx";
+    std::string backend = "both";   // both | ggml | ort
     int threads = 0;
     int warmup = 3;
     int runs = 10;
@@ -51,6 +52,7 @@ Args parse_args(int argc, char** argv) {
         else if (arg == "--warmup") a.warmup = std::atoi(next().c_str());
         else if (arg == "--runs") a.runs = std::atoi(next().c_str());
         else if (arg == "--out") a.out = next();
+        else if (arg == "--backend") a.backend = next();
         else if (arg == "-h" || arg == "--help") {
             std::cout <<
 R"(pc-nsf-hifigan CPU benchmark
@@ -61,6 +63,7 @@ Usage: benchmark [options]
   --warmup N    Warmup runs per case (default: 3)
   --runs N      Timed runs per case (default: 10)
   --out PATH    Report file (default: benchmark_report.md)
+  --backend B   both | ggml | ort (default: both)
 )";
             std::exit(0);
         }

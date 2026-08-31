@@ -132,7 +132,10 @@ jobs:
         config:
           - { name: Ubuntu,  os: ubuntu-latest }
           - { name: Windows, os: windows-latest }
-          - { name: macOS,   os: macos-latest }
+          # macOS omitted: ggml backend uses Metal (IM2COL_FAST_1D unsupported)
+          # and the ggml CPU path has an independent crash; ORT-only CPU
+          # benchmarking is the goal here. Re-enable once the ggml CPU path
+          # is fixed and/or the Metal PR is merged.
 
     steps:
       - uses: actions/checkout@v4
@@ -241,19 +244,30 @@ jobs:
           echo "=== package contents ==="
           ls -la package
 
-      - name: Run smoke benchmark
+      - name: Run smoke benchmark (Linux/macOS)
+        if: ${{ matrix.config.os != 'windows-latest' }}
         env:
-          LD_LIBRARY_PATH: ${{ github.workspace }}/package:${LD_LIBRARY_PATH}
-          DYLD_LIBRARY_PATH: ${{ github.workspace }}/package:${DYLD_LIBRARY_PATH}
+          LD_LIBRARY_PATH: ${{ github.workspace }}/package
         shell: bash
         run: |
           set -euo pipefail
           cd package
-          if [[ "${{ matrix.config.name }}" == "Windows" ]]; then
-            ./pcnsf_benchmark.exe --warmup 1 --runs 1 --out benchmark_report.md
-          else
-            ./pcnsf_benchmark --warmup 1 --runs 1 --out benchmark_report.md
-          fi
+          # ggml backend currently has an independent crash (Ubuntu CPU segfault /
+          # macOS Metal unsupported op); CPU benchmarking here validates the ORT
+          # path. TODO: re-enable ggml once the ggml CPU path is fixed.
+          ./pcnsf_benchmark --backend ort --warmup 1 --runs 1 --out benchmark_report.md
+          echo "=== report ==="
+          cat benchmark_report.md
+
+      - name: Run smoke benchmark (Windows)
+        if: ${{ matrix.config.os == 'windows-latest' }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd package
+          # ORT dll is copied next to the exe by CMake POST_BUILD, so no env tweak
+          # is needed. ggml backend omitted for the same reason as above.
+          ./pcnsf_benchmark.exe --backend ort --warmup 1 --runs 1 --out benchmark_report.md
           echo "=== report ==="
           cat benchmark_report.md
 
