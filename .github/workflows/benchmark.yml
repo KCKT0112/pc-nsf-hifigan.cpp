@@ -142,6 +142,7 @@ jobs:
       - name: Download ONNX Runtime SDK
         env:
           ORT_VERSION: 1.20.0
+          ORT_ASSET: ${{ matrix.config.name == 'Ubuntu' && 'linux-x64' || 'osx-arm64' }}
         shell: bash
         run: |
           set -euo pipefail
@@ -152,17 +153,40 @@ jobs:
             unzip -q ort.zip -d ort
             cp -r ort/*/* .
             rm -rf ort ort.zip
-          elif [[ "${{ matrix.config.name }}" == "Ubuntu" ]]; then
-            curl -fL -o ort.tgz "https://github.com/microsoft/onnxruntime/releases/download/v${ORT_VERSION}/onnxruntime-linux-x64-${ORT_VERSION}.tgz"
-            tar -xzf ort.tgz --strip-components=1
-            rm ort.tgz
           else
-            curl -fL -o ort.tgz "https://github.com/microsoft/onnxruntime/releases/download/v${ORT_VERSION}/onnxruntime-osx-arm64-${ORT_VERSION}.tgz"
-            tar -xzf ort.tgz --strip-components=1
+            # Linux / macOS official release archives are wrapped in a versioned
+            # top-level directory (e.g. onnxruntime-osx-arm64-1.20.0/). Extract
+            # raw, then flatten that one directory if present so that
+            # include/, lib/, bin/ land directly under .onnxruntime/.
+            curl -fL -o ort.tgz "https://github.com/microsoft/onnxruntime/releases/download/v${ORT_VERSION}/onnxruntime-${ORT_ASSET}-${ORT_VERSION}.tgz"
+            tar -xzf ort.tgz
             rm ort.tgz
+            shopt -s dotglob
+            top=$(ls -d */ 2>/dev/null | head -n1)
+            if [ -n "$top" ] && [ -d "$top" ]; then
+              # If the single top dir is the versioned package dir, flatten it.
+              if [ "$(ls -1 | wc -l)" -eq 1 ] && [ -d "$top/include" ]; then
+                mv "$top"/* . 2>/dev/null || true
+                rmdir "$top" 2>/dev/null || true
+              fi
+            fi
+            shopt -u dotglob
           fi
+          echo "=== .onnxruntime layout ==="
           ls -la
-          test -f include/onnxruntime_c_api.h || { echo "::error::onnxruntime_c_api.h not present"; exit 1; }
+          # Defensive: if the SDK landed inside a nested package dir (e.g. the
+          # archive wrapped include/lib/bin under onnxruntime-*-X.Y.Z/), pull
+          # include/ and lib/ (and bin/ on Windows) up to the root.
+          if [ ! -f include/onnxruntime_c_api.h ]; then
+            src=$(find . -name onnxruntime_c_api.h 2>/dev/null | head -n1)
+            if [ -n "$src" ]; then
+              inc_root=$(cd "$(dirname "$(dirname "$src")")" && pwd)
+              cp -r "$inc_root/include" . 2>/dev/null || true
+              cp -r "$inc_root/lib" . 2>/dev/null || true
+              cp -r "$inc_root/bin" . 2>/dev/null || true
+            fi
+          fi
+          test -f include/onnxruntime_c_api.h || { echo "::error::onnxruntime_c_api.h not present under .onnxruntime/include"; exit 1; }
 
       - name: Download model weights
         uses: actions/download-artifact@v4
@@ -218,6 +242,9 @@ jobs:
           ls -la package
 
       - name: Run smoke benchmark
+        env:
+          LD_LIBRARY_PATH: ${{ github.workspace }}/package:${LD_LIBRARY_PATH}
+          DYLD_LIBRARY_PATH: ${{ github.workspace }}/package:${DYLD_LIBRARY_PATH}
         shell: bash
         run: |
           set -euo pipefail
