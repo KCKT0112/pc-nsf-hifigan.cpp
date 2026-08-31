@@ -1,6 +1,7 @@
 #include "cpu_info.h"
 #include <algorithm>
 #include <cstring>
+#include <fstream>
 #include <iomanip>
 #include <sstream>
 #include <string>
@@ -15,7 +16,6 @@
 #  include <sys/sysctl.h>
 #  include <sys/types.h>
 #else
-#  include <fstream>
 #  include <array>
 #endif
 
@@ -126,29 +126,23 @@ CpuInfo get_cpu_info() {
 
 #else
     // x86 / x86_64
-    int cpu_info[4] = {0};
+    unsigned int cpu_info[4] = {0};
 
 #  if defined(_MSC_VER) || defined(__INTEL_COMPILER)
-    auto cpuidex = [&](int func, int sub) { __cpuidex(cpu_info, func, sub); };
-    auto cpuid0  = [&](int func)          { __cpuid(cpu_info, func); };
+    auto cpuidex = [&](unsigned int func, unsigned int sub) { __cpuidex(reinterpret_cast<int*>(cpu_info), static_cast<int>(func), static_cast<int>(sub)); };
+    auto cpuid0  = [&](unsigned int func)                 { __cpuid(reinterpret_cast<int*>(cpu_info), static_cast<int>(func)); };
 #  elif defined(__APPLE__) || defined(_WIN32)
-    // Fallback for non-MSVC on these platforms: minimal leaf 0/1 only.
-    auto cpuidex = [&](int func, int sub) {
-        // Apple clang / Win clang without cpuid.h: use inline asm guard? Not available.
-        // Use __cpuid when present.
-#    if defined(__clang__) || defined(__GNUC__)
-        // Apple platforms: cpuid intrinsics are available via <cpuid.h> only on x86;
-        // if we reach here on Apple it is x86_64 with clang which supports __cpuid.
-#      if defined(__clang__)
-        __cpuid_count(func, sub, cpu_info[0], cpu_info[1], cpu_info[2], cpu_info[3]);
-#      else
-        cpu_info[0] = cpu_info[1] = cpu_info[2] = cpu_info[3] = 0;
-#      endif
-#    else
-        cpu_info[0] = cpu_info[1] = cpu_info[2] = cpu_info[3] = 0;
-#    endif
+    // clang/gcc on these platforms with cpuid.h available:
+    auto cpuidex = [&](unsigned int func, unsigned int sub) {
+        if (__get_cpuid_count(func, sub, &cpu_info[0], &cpu_info[1], &cpu_info[2], &cpu_info[3]) == 0) {
+            cpu_info[0] = cpu_info[1] = cpu_info[2] = cpu_info[3] = 0;
+        }
     };
-    auto cpuid0 = [&](int func) { cpuidex(func, 0); };
+    auto cpuid0 = [&](unsigned int func) {
+        if (__get_cpuid(func, &cpu_info[0], &cpu_info[1], &cpu_info[2], &cpu_info[3]) == 0) {
+            cpu_info[0] = cpu_info[1] = cpu_info[2] = cpu_info[3] = 0;
+        }
+    };
 #  else
     // Linux / generic gcc-clang: use <cpuid.h>
     auto cpuidex = [&](unsigned int func, unsigned int sub) {
@@ -174,16 +168,14 @@ CpuInfo get_cpu_info() {
 
     unsigned int max_ext = 0;
     cpuid0(0x80000000);
-    max_ext = static_cast<unsigned int>(cpu_info[0]);
+    max_ext = cpu_info[0];
 
     if (max_ext >= 0x80000004) {
         char brand[49] = {0};
         for (unsigned int i = 0x80000002; i <= 0x80000004; ++i) {
-            int t[4] = {0};
-            auto saved = cpu_info;
+            unsigned int t[4] = {0};
             cpuid0(i);
             std::memcpy(t, cpu_info, sizeof(t));
-            cpu_info = saved;
             size_t offset = (i - 0x80000002) * 16;
             std::memcpy(brand + offset + 0, &t[0], 4);
             std::memcpy(brand + offset + 4, &t[1], 4);
@@ -201,11 +193,9 @@ CpuInfo get_cpu_info() {
 
     // AVX2 / AVX-512F live in leaf 7, sub-leaf 0 (EBX)
     {
-        int l7[4] = {0};
-        auto saved = cpu_info;
+        unsigned int l7[4] = {0};
         cpuidex(7, 0);
         std::memcpy(l7, cpu_info, sizeof(l7));
-        cpu_info = saved;
         info.avx2    = (l7[1] & (1u << 5)) != 0;
         info.avx512f = (l7[1] & (1u << 16)) != 0;
     }
