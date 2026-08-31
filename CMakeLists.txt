@@ -118,27 +118,53 @@ if(PCNSF_BUILD_BENCHMARK)
         message(FATAL_ERROR "PCNSF_BUILD_BENCHMARK=ON requires ONNX_RUNTIME_ROOT to be set")
     endif()
 
+    # ONNX_RUNTIME_ROOT must point at an *official* ONNX Runtime release package
+    # (the layout produced by onnxruntime-{win-x64,linux-x64,osx-arm64}-X.Y.Z):
+    #   include/onnxruntime_c_api.h   <- flat public C API header
+    #   lib/onnxruntime.lib | lib/libonnxruntime.{so,dylib}
+    # No headers or import libraries are vendored in this repository; the SDK is
+    # always fetched (see .github/workflows/benchmark.yml).
     set(ORT_INC "${ONNX_RUNTIME_ROOT}/include")
+    if(NOT EXISTS "${ORT_INC}/onnxruntime_c_api.h")
+        message(FATAL_ERROR
+            "onnxruntime_c_api.h not found under ${ORT_INC}. "
+            "ONNX_RUNTIME_ROOT must point at an extracted official ONNX Runtime release package.")
+    endif()
+
     if(WIN32)
-        set(ORT_LIB "${ONNX_RUNTIME_ROOT}/lib/onnxruntime.lib")
-        if(NOT EXISTS "${ORT_LIB}")
-            set(ORT_LIB "${ONNX_RUNTIME_ROOT}/onnxruntime.lib")
-        endif()
-        if(NOT EXISTS "${ORT_LIB}")
-            set(ORT_LIB "${CMAKE_CURRENT_SOURCE_DIR}/tools/benchmark/onnxruntime.lib")
-        endif()
-        set(ORT_DLL "${ONNX_RUNTIME_ROOT}/bin/onnxruntime.dll")
-        if(NOT EXISTS "${ORT_DLL}")
-            set(ORT_DLL "${ONNX_RUNTIME_ROOT}/onnxruntime.dll")
-        endif()
-        set(ORT_SHARED_DLL "${ONNX_RUNTIME_ROOT}/bin/onnxruntime_providers_shared.dll")
-        if(NOT EXISTS "${ORT_SHARED_DLL}")
-            set(ORT_SHARED_DLL "${ONNX_RUNTIME_ROOT}/onnxruntime_providers_shared.dll")
-        endif()
+        set(ORT_LIB_CANDIDATES "${ONNX_RUNTIME_ROOT}/lib/onnxruntime.lib"
+                               "${ONNX_RUNTIME_ROOT}/onnxruntime.lib")
     elseif(APPLE)
-        set(ORT_LIB "${ONNX_RUNTIME_ROOT}/lib/libonnxruntime.dylib")
+        set(ORT_LIB_CANDIDATES "${ONNX_RUNTIME_ROOT}/lib/libonnxruntime.dylib"
+                               "${ONNX_RUNTIME_ROOT}/libonnxruntime.dylib")
     else()
-        set(ORT_LIB "${ONNX_RUNTIME_ROOT}/lib/libonnxruntime.so")
+        set(ORT_LIB_CANDIDATES "${ONNX_RUNTIME_ROOT}/lib/libonnxruntime.so"
+                               "${ONNX_RUNTIME_ROOT}/libonnxruntime.so")
+    endif()
+
+    set(ORT_LIB "")
+    foreach(cand IN LISTS ORT_LIB_CANDIDATES)
+        if(EXISTS "${cand}")
+            set(ORT_LIB "${cand}")
+            break()
+        endif()
+    endforeach()
+    if(NOT ORT_LIB)
+        message(FATAL_ERROR
+            "ONNX Runtime link library not found. Looked for: ${ORT_LIB_CANDIDATES}")
+    endif()
+    message(STATUS "  ONNX Runtime ....... ${ORT_LIB}")
+
+    if(WIN32)
+        # Runtime DLLs live in bin/ in the release zip; older layouts keep them at the root.
+        file(GLOB ORT_RUNTIME_DLLS
+            "${ONNX_RUNTIME_ROOT}/lib/onnxruntime*.dll"
+            "${ONNX_RUNTIME_ROOT}/bin/onnxruntime*.dll"
+            "${ONNX_RUNTIME_ROOT}/onnxruntime*.dll")
+    elseif(APPLE)
+        file(GLOB ORT_RUNTIME_DLLS "${ONNX_RUNTIME_ROOT}/lib/libonnxruntime*.dylib")
+    else()
+        file(GLOB ORT_RUNTIME_DLLS "${ONNX_RUNTIME_ROOT}/lib/libonnxruntime.so*")
     endif()
 
     add_executable(pcnsf_benchmark
@@ -160,33 +186,12 @@ if(PCNSF_BUILD_BENCHMARK)
     )
     target_compile_options(pcnsf_benchmark PRIVATE ${PCNSF_WARN_FLAGS})
 
-    # Copy ONNX Runtime shared libs / DLLs next to the executable
-    if(WIN32 AND EXISTS "${ORT_DLL}")
-        add_custom_COMMAND(TARGET pcnsf_benchmark POST_BUILD
-            COMMAND ${CMAKE_COMMAND} -E copy ${ORT_DLL} $<TARGET_FILE_DIR:pcnsf_benchmark>)
-    endif()
-    if(WIN32 AND EXISTS "${ORT_SHARED_DLL}")
-        add_custom_COMMAND(TARGET pcnsf_benchmark POST_BUILD
-            COMMAND ${CMAKE_COMMAND} -E copy ${ORT_SHARED_DLL} $<TARGET_FILE_DIR:pcnsf_benchmark>)
-    endif()
-    if(APPLE AND EXISTS "${ORT_LIB}")
-        add_custom_COMMAND(TARGET pcnsf_benchmark POST_BUILD
-            COMMAND ${CMAKE_COMMAND} -E copy ${ORT_LIB} $<TARGET_FILE_DIR:pcnsf_benchmark>)
-    endif()
-    if(UNIX AND NOT APPLE AND EXISTS "${ORT_LIB}")
-        add_custom_COMMAND(TARGET pcnsf_benchmark POST_BUILD
-            COMMAND ${CMAKE_COMMAND} -E copy ${ORT_LIB} $<TARGET_FILE_DIR:pcnsf_benchmark>)
-    endif()
-
-    # Copy models next to executable if present
-    set(PCNSF_BENCH_MODEL_DIR "${CMAKE_CURRENT_SOURCE_DIR}/tools/benchmark/models")
-    foreach(m IN ITEMS hifigan_f32.gguf nsf_hifigan.onnx)
-        if(EXISTS "${PCNSF_BENCH_MODEL_DIR}/${m}")
-            add_custom_COMMAND(TARGET pcnsf_benchmark POST_BUILD
-                COMMAND ${CMAKE_COMMAND} -E copy
-                    "${PCNSF_BENCH_MODEL_DIR}/${m}"
-                    $<TARGET_FILE_DIR:pcnsf_benchmark>)
-        endif()
+    # Copy the ONNX Runtime shared libraries next to the executable so the
+    # packaged benchmark runs without any extra environment setup.
+    foreach(dll IN LISTS ORT_RUNTIME_DLLS)
+        add_custom_command(TARGET pcnsf_benchmark POST_BUILD
+            COMMAND ${CMAKE_COMMAND} -E copy_if_different
+                "${dll}" "$<TARGET_FILE_DIR:pcnsf_benchmark>")
     endforeach()
 endif()
 

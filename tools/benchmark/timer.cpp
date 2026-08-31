@@ -3,31 +3,23 @@
 #include <cmath>
 #include <numeric>
 #include <vector>
-#include <windows.h>
 
 namespace bench {
 
 void Timer::start() {
-    QueryPerformanceFrequency(&freq_);
-    QueryPerformanceCounter(&start_);
+    start_ = clock_t::now();
     running_ = true;
 }
 
 void Timer::stop() {
-    QueryPerformanceCounter(&stop_);
+    stop_ = clock_t::now();
     running_ = false;
 }
 
 double Timer::elapsed_ms() const {
-    LARGE_INTEGER end = running_ ? LARGE_INTEGER{} : stop_;
-    if (!running_) {
-        return static_cast<double>(end.QuadPart - start_.QuadPart)
-               / freq_.QuadPart * 1000.0;
-    }
-    LARGE_INTEGER now;
-    QueryPerformanceCounter(&now);
-    return static_cast<double>(now.QuadPart - start_.QuadPart)
-           / freq_.QuadPart * 1000.0;
+    clock_t::time_point end = running_ ? clock_t::now() : stop_;
+    auto dur = std::chrono::duration<double, std::milli>(end - start_);
+    return dur.count();
 }
 
 RunStats measure_latency_ms(void (*fn)(void*), void* arg,

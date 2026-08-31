@@ -2,6 +2,7 @@
 
 #include <string>
 #include <vector>
+#include <thread>
 #include <cstdint>
 
 namespace bench {
@@ -20,6 +21,7 @@ struct CpuInfo {
     bool avx2 = false;
     bool avx512f = false;
     bool fma = false;
+    bool neon = false;
 
     std::string to_string() const;
 };

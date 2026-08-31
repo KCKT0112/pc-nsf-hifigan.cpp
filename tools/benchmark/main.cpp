@@ -28,8 +28,8 @@ struct Args {
     std::string gguf = "hifigan_f32.gguf";
     std::string onnx = "nsf_hifigan.onnx";
     int threads = 0;
-    int warmup = 1;
-    int runs = 3;
+    int warmup = 3;
+    int runs = 10;
     std::string out = "benchmark_report.md";
     std::vector<int> lengths = {256, 512, 1024, 1722, 2048, 4096};
 };
@@ -111,6 +111,7 @@ struct OrtBenchContext {
 } // namespace
 
 #ifdef _WIN32
+#include <windows.h>
 LONG WINAPI seh_filter(EXCEPTION_POINTERS* ep) {
     std::cerr << "SEH exception: 0x" << std::hex << ep->ExceptionRecord->ExceptionCode << std::dec << "\n";
     return EXCEPTION_EXECUTE_HANDLER;

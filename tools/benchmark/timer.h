@@ -1,7 +1,7 @@
 #pragma once
 
 #include <cstddef>
-#include <windows.h>
+#include <chrono>
 
 namespace bench {
 
@@ -12,9 +12,9 @@ public:
     double elapsed_ms() const;
 
 private:
-    LARGE_INTEGER freq_{};
-    LARGE_INTEGER start_{};
-    LARGE_INTEGER stop_{};
+    using clock_t = std::chrono::steady_clock;
+    clock_t::time_point start_{};
+    clock_t::time_point stop_{};
     bool running_ = false;
 };
 

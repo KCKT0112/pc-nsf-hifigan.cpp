@@ -7,10 +7,125 @@ on:
   release:
     types: [published]
 
+# Avoid spinning up the heavy prepare+matrix jobs on no-op changes.
+concurrency:
+  group: benchmark-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
+  # ---------------------------------------------------------------------------
+  # prepare-model: download the openvpi vocoder weights, convert the PyTorch
+  # checkpoint to GGUF, extract the ONNX graph from the .oudep package, then
+  # upload everything as a single artifact consumed by the build matrix.
+  # ---------------------------------------------------------------------------
+  prepare-model:
+    name: Prepare model weights
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.10"
+
+      - name: Install conversion dependencies
+        run: |
+          python -m pip install --upgrade pip
+          # CPU-only torch is sufficient for the one-off GGUF conversion.
+          python -m pip install "torch==2.4.1" --index-url https://download.pytorch.org/whl/cpu
+          python -m pip install gguf numpy
+
+      - name: Download openvpi weights (checkpoint zip + ONNX .oudep)
+        env:
+          ZIP_URL: "https://github.com/openvpi/vocoders/releases/download/pc-nsf-hifigan-44.1k-hop512-128bin-2025.02/pc_nsf_hifigan_44.1k_hop512_128bin_2025.02.zip"
+          OUDEP_URL: "https://github.com/openvpi/vocoders/releases/download/pc-nsf-hifigan-44.1k-hop512-128bin-2025.02/pc_nsf_hifigan_44.1k_hop512_128bin_2025.02.oudep"
+        run: |
+          set -euo pipefail
+          mkdir -p model_src
+          echo "Downloading checkpoint zip ..."
+          curl -fL -o model_src/weights.zip "$ZIP_URL"
+          echo "Downloading ONNX .oudep ..."
+          curl -fL -o model_src/vocoder.oudep "$OUDEP_URL"
+          ls -la model_src
+
+      - name: Convert checkpoint to GGUF
+        run: |
+          set -euo pipefail
+          mkdir -p model
+          cd model_src
+          unzip -o -q weights.zip -d extracted
+          CKPT=$(find extracted -name "*.ckpt" | head -n1)
+          CFG=$(find extracted -name "config.json" | head -n1)
+          if [ -z "$CKPT" ] || [ -z "$CFG" ]; then
+            echo "::error::checkpoint or config.json not found in zip"
+            find extracted -maxdepth 3 -type f | head -n 50
+            exit 1
+          fi
+          echo "ckpt=$CKPT  config=$CFG"
+          python "$GITHUB_WORKSPACE/converter/convert_hifigan.py" \
+            --ckpt "$CKPT" \
+            --config "$CFG" \
+            --out "$GITHUB_WORKSPACE/model/hifigan_f32.gguf" \
+            --dtype F32
+          ls -la "$GITHUB_WORKSPACE/model"
+
+      - name: Extract ONNX from .oudep package
+        run: |
+          set -euo pipefail
+          cd model_src
+          # .oudep is a zip; pull out the .onnx vocoder graph (any name) + manifests.
+          python - <<'PY'
+          import zipfile, os, glob, shutil
+          src = "vocoder.oudep"
+          out = os.path.join(os.environ["GITHUB_WORKSPACE"], "model")
+          os.makedirs(out, exist_ok=True)
+          with zipfile.ZipFile(src) as z:
+              names = z.namelist()
+              onnx = [n for n in names if n.endswith(".onnx")]
+              keep = [n for n in names if n.endswith((".onnx", "oudep.yaml", "vocoder.yaml",
+                                                      "NOTICE.txt", "NOTICE.zh-CN.txt", "STATEMENTS.txt"))]
+              for n in keep:
+                  dest = os.path.join(out, os.path.basename(n))
+                  with z.open(n) as f, open(dest, "wb") as w:
+                      shutil.copyfileobj(f, w)
+                  print("extracted", n, "->", dest)
+              if not onnx:
+                  raise SystemExit("no .onnx found inside .oudep")
+          # Normalize the ONNX graph name to what the benchmark expects.
+          for f in glob.glob(os.path.join(out, "*.onnx")):
+              target = os.path.join(out, "nsf_hifigan.onnx")
+              if os.path.abspath(f) != os.path.abspath(target):
+                  shutil.move(f, target)
+          print("final model dir:", sorted(os.listdir(out)))
+          PY
+
+      - name: Sanity check model artifact
+        run: |
+          set -euo pipefail
+          cd model
+          test -s hifigan_f32.gguf || { echo "::error::GGUF missing/empty"; exit 1; }
+          test -s nsf_hifigan.onnx || { echo "::error::ONNX missing/empty"; exit 1; }
+          ls -la
+
+      - name: Upload model artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: model-weights
+          path: model/
+          if-no-files-found: error
+
+  # ---------------------------------------------------------------------------
+  # benchmark: build the cross-platform pcnsf_benchmark, fetch the ORT SDK,
+  # drop in the prepared model weights, and package an immediately-runnable
+  # archive per OS.
+  # ---------------------------------------------------------------------------
   benchmark:
     name: ${{ matrix.config.name }}
     runs-on: ${{ matrix.config.os }}
+    needs: prepare-model
     strategy:
       fail-fast: false
       matrix:
@@ -24,86 +139,106 @@ jobs:
         with:
           submodules: recursive
 
-      - name: Download ONNX Runtime
+      - name: Download ONNX Runtime SDK
         env:
           ORT_VERSION: 1.20.0
+        shell: bash
         run: |
           set -euo pipefail
           mkdir -p .onnxruntime
           cd .onnxruntime
           if [[ "${{ matrix.config.name }}" == "Windows" ]]; then
-            curl -L -o ort.zip "https://github.com/microsoft/onnxruntime/releases/download/v${ORT_VERSION}/onnxruntime-win-x64-${ORT_VERSION}.zip"
+            curl -fL -o ort.zip "https://github.com/microsoft/onnxruntime/releases/download/v${ORT_VERSION}/onnxruntime-win-x64-${ORT_VERSION}.zip"
             unzip -q ort.zip -d ort
             cp -r ort/*/* .
             rm -rf ort ort.zip
           elif [[ "${{ matrix.config.name }}" == "Ubuntu" ]]; then
-            curl -L -o ort.tgz "https://github.com/microsoft/onnxruntime/releases/download/v${ORT_VERSION}/onnxruntime-linux-x64-${ORT_VERSION}.tgz"
+            curl -fL -o ort.tgz "https://github.com/microsoft/onnxruntime/releases/download/v${ORT_VERSION}/onnxruntime-linux-x64-${ORT_VERSION}.tgz"
             tar -xzf ort.tgz --strip-components=1
             rm ort.tgz
           else
-            curl -L -o ort.tgz "https://github.com/microsoft/onnxruntime/releases/download/v${ORT_VERSION}/onnxruntime-osx-arm64-${ORT_VERSION}.tgz"
+            curl -fL -o ort.tgz "https://github.com/microsoft/onnxruntime/releases/download/v${ORT_VERSION}/onnxruntime-osx-arm64-${ORT_VERSION}.tgz"
             tar -xzf ort.tgz --strip-components=1
             rm ort.tgz
           fi
-        shell: bash
+          ls -la
+          test -f include/onnxruntime_c_api.h || { echo "::error::onnxruntime_c_api.h not present"; exit 1; }
 
-      - name: Download models
-        env:
-          REPO: KakaruHayate/pc-nsf-hifigan.cpp
-        run: |
-          set -euo pipefail
-          mkdir -p models
-          curl -f -L -o models/hifigan_f32.gguf "https://github.com/${REPO}/releases/latest/download/hifigan_f32.gguf" || echo "hifigan_f32.gguf not found in releases"
-          curl -f -L -o models/nsf_hifigan.onnx "https://github.com/${REPO}/releases/latest/download/nsf_hifigan.onnx" || echo "nsf_hifigan.onnx not found in releases"
-        shell: bash
+      - name: Download model weights
+        uses: actions/download-artifact@v4
+        with:
+          name: model-weights
+          path: model
 
       - name: Configure
         env:
           ORT_ROOT: ${{ github.workspace }}/.onnxruntime
-        run: cmake -S . -B build -D CMAKE_BUILD_TYPE=Release -D PCNSF_BUILD_BENCHMARK=ON -D ONNX_RUNTIME_ROOT="$ORT_ROOT"
         shell: bash
+        run: cmake -S . -B build -D CMAKE_BUILD_TYPE=Release -D PCNSF_BUILD_BENCHMARK=ON -D ONNX_RUNTIME_ROOT="$ORT_ROOT"
 
       - name: Build
-        run: cmake --build build --config Release -j
         shell: bash
+        run: cmake --build build --config Release -j
 
       - name: Verify build
+        shell: bash
         run: |
+          set -euo pipefail
+          ls -la build/bin/ || true
           if [[ "${{ matrix.config.name }}" == "Windows" ]]; then
-            ls -la build/bin/ || true
             test -f build/bin/pcnsf_benchmark.exe
           else
-            ls -la build/bin/ || true
             test -f build/bin/pcnsf_benchmark
           fi
-        shell: bash
 
-      - name: Package
+      - name: Stage package (exe + models + ORT runtime)
+        shell: bash
         run: |
           set -euo pipefail
           mkdir -p package
+          shopt -s nullglob
+          # Executable
           if [[ "${{ matrix.config.name }}" == "Windows" ]]; then
-            EXE=build/bin/pcnsf_benchmark.exe
-            if [ -f "$EXE" ]; then cp "$EXE" package/; fi
-            files=(models/*)
-            if [ ${#files[@]} -gt 0 ]; then cp "${files[@]}" package/; fi
-            files=(.onnxruntime/bin/onnxruntime*.dll)
-            if [ ${#files[@]} -gt 0 ]; then cp "${files[@]}" package/; fi
-            files=(.onnxruntime/lib/onnxruntime*.lib)
-            if [ ${#files[@]} -gt 0 ]; then cp "${files[@]}" package/; fi
+            cp build/bin/pcnsf_benchmark.exe package/
+          else
+            cp build/bin/pcnsf_benchmark package/
+          fi
+          # Model weights produced by prepare-model
+          cp model/* package/ 2>/dev/null || true
+          # ONNX Runtime shared library (next to the exe so it runs with no env setup)
+          if [[ "${{ matrix.config.name }}" == "Windows" ]]; then
+            cp .onnxruntime/bin/onnxruntime*.dll package/ 2>/dev/null || true
+            cp .onnxruntime/lib/onnxruntime*.dll package/ 2>/dev/null || true
+          elif [[ "${{ matrix.config.name }}" == "macOS" ]]; then
+            cp .onnxruntime/lib/libonnxruntime*.dylib package/ 2>/dev/null || true
+          else
+            cp .onnxruntime/lib/libonnxruntime.so* package/ 2>/dev/null || true
+          fi
+          echo "=== package contents ==="
+          ls -la package
+
+      - name: Run smoke benchmark
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd package
+          if [[ "${{ matrix.config.name }}" == "Windows" ]]; then
+            ./pcnsf_benchmark.exe --warmup 1 --runs 1 --out benchmark_report.md
+          else
+            ./pcnsf_benchmark --warmup 1 --runs 1 --out benchmark_report.md
+          fi
+          echo "=== report ==="
+          cat benchmark_report.md
+
+      - name: Package archive
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [[ "${{ matrix.config.name }}" == "Windows" ]]; then
             powershell -Command "Compress-Archive -Path package/* -DestinationPath benchmark.zip -Force"
           else
-            EXE=build/bin/pcnsf_benchmark
-            if [ -f "$EXE" ]; then cp "$EXE" package/; fi
-            files=(models/*)
-            if [ ${#files[@]} -gt 0 ]; then cp "${files[@]}" package/; fi
-            files=(.onnxruntime/lib/*.so*)
-            if [ ${#files[@]} -gt 0 ]; then cp "${files[@]}" package/; fi
-            files=(.onnxruntime/lib/*.dylib*)
-            if [ ${#files[@]} -gt 0 ]; then cp "${files[@]}" package/; fi
             tar -czf benchmark.tar.gz -C package .
           fi
-        shell: bash
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
@@ -112,4 +247,4 @@ jobs:
           path: |
             benchmark.zip
             benchmark.tar.gz
-          if-no-files-found: ignore
+          if-no-files-found: error

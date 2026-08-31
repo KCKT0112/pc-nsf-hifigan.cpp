@@ -6,29 +6,10 @@
 #include <windows.h>
 #endif
 
-#define NO_EXCEPTION
-extern "C" {
-    #include "onnxruntime/core/session/onnxruntime_c_api.h"
-}
-#undef ORT_API_VERSION
-#define ORT_API_VERSION 24
-#undef NO_EXCEPTION
-
-#if defined(_WIN32) && defined(_MSC_VER)
-extern "C" const OrtApi* safe_get_api(const OrtApiBase* base, size_t version) {
-    const OrtApi* result = nullptr;
-    __try {
-        result = base->GetApi(version);
-    } __except (EXCEPTION_EXECUTE_HANDLER) {
-        // exception handled, result remains nullptr
-    }
-    return result;
-}
-#else
-inline const OrtApi* safe_get_api(const OrtApiBase* base, size_t version) {
-    return base->GetApi(version);
-}
-#endif
+// Official ONNX Runtime flat header, fetched by CI into ${ONNX_RUNTIME_ROOT}/include.
+// ORT_API_VERSION is provided by this header; do NOT hard-code it (the installed
+// ORT release may differ from the one this file was originally written against).
+#include <onnxruntime_c_api.h>
 
 namespace bench {
 
@@ -117,7 +98,7 @@ OrtRunner& OrtRunner::operator=(OrtRunner&& other) noexcept {
 OrtRunner OrtRunner::create(const std::string& model_path, int intra_op_num_threads) {
     OrtRunner runner{};
     const OrtApiBase* base = OrtGetApiBase();
-    const OrtApi* api = base ? safe_get_api(base, ORT_API_VERSION) : nullptr;
+    const OrtApi* api = base ? base->GetApi(ORT_API_VERSION) : nullptr;
     if (!api) {
         throw std::runtime_error("Failed to obtain ONNX Runtime C API table.");
     }
