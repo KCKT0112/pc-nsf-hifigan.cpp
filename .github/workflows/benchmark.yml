@@ -1,0 +1,115 @@
+name: Benchmark
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  release:
+    types: [published]
+
+jobs:
+  benchmark:
+    name: ${{ matrix.config.name }}
+    runs-on: ${{ matrix.config.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        config:
+          - { name: Ubuntu,  os: ubuntu-latest }
+          - { name: Windows, os: windows-latest }
+          - { name: macOS,   os: macos-latest }
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Download ONNX Runtime
+        env:
+          ORT_VERSION: 1.20.0
+        run: |
+          set -euo pipefail
+          mkdir -p .onnxruntime
+          cd .onnxruntime
+          if [[ "${{ matrix.config.name }}" == "Windows" ]]; then
+            curl -L -o ort.zip "https://github.com/microsoft/onnxruntime/releases/download/v${ORT_VERSION}/onnxruntime-win-x64-${ORT_VERSION}.zip"
+            unzip -q ort.zip -d ort
+            cp -r ort/*/* .
+            rm -rf ort ort.zip
+          elif [[ "${{ matrix.config.name }}" == "Ubuntu" ]]; then
+            curl -L -o ort.tgz "https://github.com/microsoft/onnxruntime/releases/download/v${ORT_VERSION}/onnxruntime-linux-x64-${ORT_VERSION}.tgz"
+            tar -xzf ort.tgz --strip-components=1
+            rm ort.tgz
+          else
+            curl -L -o ort.tgz "https://github.com/microsoft/onnxruntime/releases/download/v${ORT_VERSION}/onnxruntime-osx-arm64-${ORT_VERSION}.tgz"
+            tar -xzf ort.tgz --strip-components=1
+            rm ort.tgz
+          fi
+        shell: bash
+
+      - name: Download models
+        env:
+          REPO: KakaruHayate/pc-nsf-hifigan.cpp
+        run: |
+          set -euo pipefail
+          mkdir -p models
+          curl -f -L -o models/hifigan_f32.gguf "https://github.com/${REPO}/releases/latest/download/hifigan_f32.gguf" || echo "hifigan_f32.gguf not found in releases"
+          curl -f -L -o models/nsf_hifigan.onnx "https://github.com/${REPO}/releases/latest/download/nsf_hifigan.onnx" || echo "nsf_hifigan.onnx not found in releases"
+        shell: bash
+
+      - name: Configure
+        env:
+          ORT_ROOT: ${{ github.workspace }}/.onnxruntime
+        run: cmake -S . -B build -D CMAKE_BUILD_TYPE=Release -D PCNSF_BUILD_BENCHMARK=ON -D ONNX_RUNTIME_ROOT="$ORT_ROOT"
+        shell: bash
+
+      - name: Build
+        run: cmake --build build --config Release -j
+        shell: bash
+
+      - name: Verify build
+        run: |
+          if [[ "${{ matrix.config.name }}" == "Windows" ]]; then
+            ls -la build/bin/ || true
+            test -f build/bin/pcnsf_benchmark.exe
+          else
+            ls -la build/bin/ || true
+            test -f build/bin/pcnsf_benchmark
+          fi
+        shell: bash
+
+      - name: Package
+        run: |
+          set -euo pipefail
+          mkdir -p package
+          if [[ "${{ matrix.config.name }}" == "Windows" ]]; then
+            EXE=build/bin/pcnsf_benchmark.exe
+            if [ -f "$EXE" ]; then cp "$EXE" package/; fi
+            files=(models/*)
+            if [ ${#files[@]} -gt 0 ]; then cp "${files[@]}" package/; fi
+            files=(.onnxruntime/bin/onnxruntime*.dll)
+            if [ ${#files[@]} -gt 0 ]; then cp "${files[@]}" package/; fi
+            files=(.onnxruntime/lib/onnxruntime*.lib)
+            if [ ${#files[@]} -gt 0 ]; then cp "${files[@]}" package/; fi
+            powershell -Command "Compress-Archive -Path package/* -DestinationPath benchmark.zip -Force"
+          else
+            EXE=build/bin/pcnsf_benchmark
+            if [ -f "$EXE" ]; then cp "$EXE" package/; fi
+            files=(models/*)
+            if [ ${#files[@]} -gt 0 ]; then cp "${files[@]}" package/; fi
+            files=(.onnxruntime/lib/*.so*)
+            if [ ${#files[@]} -gt 0 ]; then cp "${files[@]}" package/; fi
+            files=(.onnxruntime/lib/*.dylib*)
+            if [ ${#files[@]} -gt 0 ]; then cp "${files[@]}" package/; fi
+            tar -czf benchmark.tar.gz -C package .
+          fi
+        shell: bash
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.config.name }}-benchmark
+          path: |
+            benchmark.zip
+            benchmark.tar.gz
+          if-no-files-found: ignore

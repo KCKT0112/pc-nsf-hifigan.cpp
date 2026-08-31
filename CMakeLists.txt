@@ -12,6 +12,7 @@ option(PCNSF_VULKAN "Enable ggml Vulkan backend" OFF)
 option(PCNSF_BUILD_CLI    "Build hifigan_cli executable" ON)
 option(PCNSF_BUILD_TESTS  "Build C++ tests"              ON)
 option(PCNSF_BUILD_EXAMPLES "Build external consumer example" OFF)
+option(PCNSF_BUILD_BENCHMARK "Build pcnsf_benchmark executable" OFF)
 
 # On Apple, default to Metal backend on. Use PCNSF_METAL to override.
 if(APPLE)
@@ -107,6 +108,89 @@ if(PCNSF_BUILD_CLI)
 endif()
 
 # -----------------------------------------------------------------------------
+# Benchmark (ggml vs ONNX Runtime CPU)
+# -----------------------------------------------------------------------------
+if(PCNSF_BUILD_BENCHMARK)
+    if(NOT ONNX_RUNTIME_ROOT)
+        set(ONNX_RUNTIME_ROOT "$ENV{ONNX_RUNTIME_ROOT}" CACHE PATH "ONNX Runtime root")
+    endif()
+    if(NOT ONNX_RUNTIME_ROOT)
+        message(FATAL_ERROR "PCNSF_BUILD_BENCHMARK=ON requires ONNX_RUNTIME_ROOT to be set")
+    endif()
+
+    set(ORT_INC "${ONNX_RUNTIME_ROOT}/include")
+    if(WIN32)
+        set(ORT_LIB "${ONNX_RUNTIME_ROOT}/lib/onnxruntime.lib")
+        if(NOT EXISTS "${ORT_LIB}")
+            set(ORT_LIB "${ONNX_RUNTIME_ROOT}/onnxruntime.lib")
+        endif()
+        if(NOT EXISTS "${ORT_LIB}")
+            set(ORT_LIB "${CMAKE_CURRENT_SOURCE_DIR}/tools/benchmark/onnxruntime.lib")
+        endif()
+        set(ORT_DLL "${ONNX_RUNTIME_ROOT}/bin/onnxruntime.dll")
+        if(NOT EXISTS "${ORT_DLL}")
+            set(ORT_DLL "${ONNX_RUNTIME_ROOT}/onnxruntime.dll")
+        endif()
+        set(ORT_SHARED_DLL "${ONNX_RUNTIME_ROOT}/bin/onnxruntime_providers_shared.dll")
+        if(NOT EXISTS "${ORT_SHARED_DLL}")
+            set(ORT_SHARED_DLL "${ONNX_RUNTIME_ROOT}/onnxruntime_providers_shared.dll")
+        endif()
+    elseif(APPLE)
+        set(ORT_LIB "${ONNX_RUNTIME_ROOT}/lib/libonnxruntime.dylib")
+    else()
+        set(ORT_LIB "${ONNX_RUNTIME_ROOT}/lib/libonnxruntime.so")
+    endif()
+
+    add_executable(pcnsf_benchmark
+        tools/benchmark/main.cpp
+        tools/benchmark/cpu_info.cpp
+        tools/benchmark/timer.cpp
+        tools/benchmark/ggml_runner.cpp
+        tools/benchmark/ort_runner.cpp
+        tools/benchmark/accuracy.cpp
+        tools/benchmark/report.cpp
+    )
+    target_include_directories(pcnsf_benchmark PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}/tools/benchmark
+        ${ORT_INC}
+    )
+    target_link_libraries(pcnsf_benchmark PRIVATE
+        pc_nsf_hifigan::pc_nsf_hifigan
+        ${ORT_LIB}
+    )
+    target_compile_options(pcnsf_benchmark PRIVATE ${PCNSF_WARN_FLAGS})
+
+    # Copy ONNX Runtime shared libs / DLLs next to the executable
+    if(WIN32 AND EXISTS "${ORT_DLL}")
+        add_custom_COMMAND(TARGET pcnsf_benchmark POST_BUILD
+            COMMAND ${CMAKE_COMMAND} -E copy ${ORT_DLL} $<TARGET_FILE_DIR:pcnsf_benchmark>)
+    endif()
+    if(WIN32 AND EXISTS "${ORT_SHARED_DLL}")
+        add_custom_COMMAND(TARGET pcnsf_benchmark POST_BUILD
+            COMMAND ${CMAKE_COMMAND} -E copy ${ORT_SHARED_DLL} $<TARGET_FILE_DIR:pcnsf_benchmark>)
+    endif()
+    if(APPLE AND EXISTS "${ORT_LIB}")
+        add_custom_COMMAND(TARGET pcnsf_benchmark POST_BUILD
+            COMMAND ${CMAKE_COMMAND} -E copy ${ORT_LIB} $<TARGET_FILE_DIR:pcnsf_benchmark>)
+    endif()
+    if(UNIX AND NOT APPLE AND EXISTS "${ORT_LIB}")
+        add_custom_COMMAND(TARGET pcnsf_benchmark POST_BUILD
+            COMMAND ${CMAKE_COMMAND} -E copy ${ORT_LIB} $<TARGET_FILE_DIR:pcnsf_benchmark>)
+    endif()
+
+    # Copy models next to executable if present
+    set(PCNSF_BENCH_MODEL_DIR "${CMAKE_CURRENT_SOURCE_DIR}/tools/benchmark/models")
+    foreach(m IN ITEMS hifigan_f32.gguf nsf_hifigan.onnx)
+        if(EXISTS "${PCNSF_BENCH_MODEL_DIR}/${m}")
+            add_custom_COMMAND(TARGET pcnsf_benchmark POST_BUILD
+                COMMAND ${CMAKE_COMMAND} -E copy
+                    "${PCNSF_BENCH_MODEL_DIR}/${m}"
+                    $<TARGET_FILE_DIR:pcnsf_benchmark>)
+        endif()
+    endforeach()
+endif()
+
+# -----------------------------------------------------------------------------
 # Tests
 # -----------------------------------------------------------------------------
 if(PCNSF_BUILD_TESTS)
@@ -141,4 +225,5 @@ message(STATUS "  CUDA ............... ${PCNSF_CUDA}")
 message(STATUS "  Vulkan ............. ${PCNSF_VULKAN}")
 message(STATUS "  Build CLI .......... ${PCNSF_BUILD_CLI}")
 message(STATUS "  Build Tests ........ ${PCNSF_BUILD_TESTS}")
+message(STATUS "  Benchmark .......... ${PCNSF_BUILD_BENCHMARK}")
 message(STATUS "")
