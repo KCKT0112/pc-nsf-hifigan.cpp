@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+# SPDX-License-Identifier: MPL-2.0
 """Diagnose mel test failure: compare numpy golden vs DiffSinger torch nvSTFT.
 
 Uses the diffsinger conda env (torch + librosa optional).  Writes a dump the

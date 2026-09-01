@@ -109,7 +109,11 @@ surface is `pc_nsf_hifigan::HifiganModel` + `hifigan_run`, exercised end-to-end 
 
 ## License
 
-Code MIT (this repo). Model weights retain their own licenses: the DiffSinger official NSF-HiFiGAN weights are CC BY-NC-SA 4.0 (see NOTICE.md); note the non-commercial restriction.
+Code [MPL-2.0](LICENSE) (this repo), except the `patches/` directory, which is dual-licensed
+`MIT OR Apache-2.0` (see `patches/LICENSE`) so the diffs stay acceptable to upstream ggml.
+
+Model weights retain their own licenses: the DiffSinger official NSF-HiFiGAN weights are
+CC BY-NC-SA 4.0 (see [NOTICE.md](NOTICE.md)); note the non-commercial restriction.
 
 ## Project layout
 

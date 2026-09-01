@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MPL-2.0
 #pragma once
 
 // GGUF model loading (weights in meta context) + backend setup.

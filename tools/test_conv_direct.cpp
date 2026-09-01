@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MPL-2.0
 // test_conv_direct.cpp — isolate the Vulkan CONV_DIRECT_1D shader against
 // the CPU kernel with deterministic data.  Usage: [backend] (default vulkan)
 #include "ggml.h"

@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MPL-2.0
 // test_vocode: optional end-to-end vocode (requires a real GGUF).
 // Compiles only when PCNSF_MODEL_GGUF is set at configure time; the CI path
 // skips it.  Expected wav length == T*hop_size, finite, non-silent for vocal.

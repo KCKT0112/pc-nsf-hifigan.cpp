@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+# SPDX-License-Identifier: MPL-2.0
 """Golden-file generator for pc-nsf-hifigan C++ tests.
 
 Produces deterministic .bin goldens from a pure numpy re-derivation of the

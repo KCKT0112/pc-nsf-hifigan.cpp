@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MPL-2.0
 #include <algorithm>
 #include <cmath>
 #include <cstdint>

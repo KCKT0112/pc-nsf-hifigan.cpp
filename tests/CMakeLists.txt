@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: MPL-2.0
 # -----------------------------------------------------------------------------
 # Tests: golden-file comparison.  gen_golden.py (numpy reference) produces
 # goldens under ${CMAKE_BINARY_DIR}/tests/golden once at CTest time, then the

@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MPL-2.0
 // hifigan_cli: vocode mel + f0 into a mono waveform.
 //
 //   hifigan_cli <gguf> <mel.bin> <f0.bin> <out.wav>

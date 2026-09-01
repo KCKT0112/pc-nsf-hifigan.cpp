@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: MPL-2.0
 """NSF-HiFiGAN (mini_nsf) checkpoint -> GGUF converter.
 
 Architecture (modules/nsf_hifigan/models.py Generator, mini_nsf=True):

@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MPL-2.0
 // test_gguf_meta: GGUF load + metadata accessors on the tiny synthetic GGUF.
 #include "test_common.h"
 #include "pc_nsf_hifigan/gguf_model.h"

@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MPL-2.0
 // test_mel_nvstft: mel_nvstft (44.1k, slaney, nvSTFT config) vs golden.
 #include "test_common.h"
 #include "pc_nsf_hifigan/mel.h"

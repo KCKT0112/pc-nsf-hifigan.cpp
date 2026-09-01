@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MPL-2.0
 #include "ort_runner.h"
 #include <stdexcept>
 #include <iostream>

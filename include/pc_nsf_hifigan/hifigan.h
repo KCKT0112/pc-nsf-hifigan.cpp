@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MPL-2.0
 #pragma once
 
 // NSF-HiFiGAN (mini_nsf) vocoder on ggml native ops (ggml_conv_1d /

@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MPL-2.0
 #include "ggml_runner.h"
 #include <stdexcept>
 

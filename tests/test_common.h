@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MPL-2.0
 // Small golden-comparison helpers shared by the C++ tests.
 #pragma once
 

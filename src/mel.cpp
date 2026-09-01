@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MPL-2.0
 #include "pc_nsf_hifigan/mel.h"
 
 #include "pocketfft_hdronly.h"

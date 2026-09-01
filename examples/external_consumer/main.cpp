@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MPL-2.0
 // Minimal third-party integration example for pc-nsf-hifigan.cpp.
 //
 // Loads a hifigan GGUF, reads mel + f0 .bin files (mel row-major [T,128],

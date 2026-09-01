@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MPL-2.0
 // test_source: mininsf_fastsinegen_f32 (exact sin path) vs numpy golden.
 #include "test_common.h"
 

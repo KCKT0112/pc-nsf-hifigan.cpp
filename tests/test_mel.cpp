@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MPL-2.0
 // test_mel: MelExtractor (htk=True, 16k RMVPE-style config) vs golden.
 #include "test_common.h"
 #include "pc_nsf_hifigan/mel.h"

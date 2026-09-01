@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MPL-2.0
 #pragma once
 
 // Mel spectrogram front-end matching torch.stft(center=True, pad_mode='reflect')

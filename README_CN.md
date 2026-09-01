@@ -86,7 +86,11 @@ build/bin/hifigan_cli hifigan.gguf mel.bin f0.bin out.wav
 
 ## 许可
 
-代码 MIT（本仓库）。模型权重视各自许可：DiffSinger 官方 NSF-HiFiGAN 权重为 CC BY-NC-SA 4.0（见 NOTICE.md）；请注意 non-commercial 限制。
+代码 [MPL-2.0](LICENSE)（本仓库）；**例外**：`patches/` 目录采用 `MIT OR Apache-2.0` 双许可
+（见 `patches/LICENSE`），以保证这些补丁仍可被上游 ggml 接纳。
+
+模型权重视各自许可：DiffSinger 官方 NSF-HiFiGAN 权重为 CC BY-NC-SA 4.0（见
+[NOTICE.md](NOTICE.md)）；请注意 non-commercial 限制。
 
 ## 目录结构
 

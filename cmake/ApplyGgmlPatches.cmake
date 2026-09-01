@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: MPL-2.0
 # ApplyGgmlPatches.cmake — idempotent apply of the ggml-audio-patch snapshot
 # onto the freshly-fetched stock ggml v0.19.0 tree.  Invoked as FetchContent
 # PATCH_COMMAND:

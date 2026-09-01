@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MPL-2.0
 #include "report.h"
 #include "cpu_info.h"
 #include <algorithm>

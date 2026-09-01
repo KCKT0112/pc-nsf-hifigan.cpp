@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: MPL-2.0
 # ----------------------------------------------------------------------------
 # External dependencies — all via FetchContent, nothing vendored
 # (except pocketfft_hdronly.h which the original audio_ggml vendored as a
@@ -74,7 +75,7 @@ unset(_pcnsf_ggml_patch_3)
 unset(_pcnsf_ggml_patch_4)
 unset(_pcnsf_ggml_patch_5)
 
-# libmininsf (MIT) — mini-nsf sine source generator.
+# libmininsf (MPL-2.0) — mini-nsf sine source generator.
 FetchContent_Declare(
     mininsf
     GIT_REPOSITORY https://github.com/KakaruHayate/libmininsf.git

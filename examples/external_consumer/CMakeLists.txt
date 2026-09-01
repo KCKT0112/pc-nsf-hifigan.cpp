@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: MPL-2.0
 # Minimal external consumer example
 #
 #   cmake -S examples/external_consumer -B /tmp/consumer-build
