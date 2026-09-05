@@ -64,7 +64,7 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: "3.11"
-      - run: sudo apt-get update && sudo apt-get install -y libvulkan-dev mesa-vulkan-drivers glslc
+      - run: sudo apt-get update && sudo apt-get install -y libvulkan-dev mesa-vulkan-drivers glslc spirv-headers
       - run: python -m pip install numpy gguf
       - name: Configure Vulkan
         run: >
