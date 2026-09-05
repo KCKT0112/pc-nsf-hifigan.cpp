@@ -24,20 +24,38 @@ std::unique_ptr<GGUFModel> gguf_load(const std::string & path, int n_threads) {
         throw std::runtime_error("gguf_init_from_file failed: " + path);
     }
 
-    m->backend = ggml_backend_init_best();
-    if (!m->backend) {
-        throw std::runtime_error("ggml_backend_init_best failed");
-    }
-    // PCNSF_BACKEND=cpu forces the CPU backend (default init prefers Vulkan
-    // when available; both main-line paths compute in fp32).
-    if (const char * be = std::getenv("PCNSF_BACKEND"); be && std::string(be) == "cpu") {
-        ggml_backend_free(m->backend);
+    // Honour an explicit CPU request before probing the best GPU.  Besides
+    // avoiding needless GPU setup, this keeps CPU mode usable in processes
+    // that are not entitled to create a Metal command queue.
+    const char * backend_env = std::getenv("PCNSF_BACKEND");
+    if (backend_env && std::string(backend_env) == "cpu") {
         m->backend = ggml_backend_init_by_name("CPU", nullptr);
         if (!m->backend) {
             throw std::runtime_error("PCNSF_BACKEND=cpu but CPU backend init failed");
         }
+    } else {
+        if (backend_env && *backend_env && std::string(backend_env) != "auto") {
+            throw std::runtime_error("unsupported PCNSF_BACKEND='" +
+                                     std::string(backend_env) + "' (expected auto or cpu)");
+        }
+        m->backend = ggml_backend_init_best();
+        if (!m->backend) {
+            throw std::runtime_error("ggml_backend_init_best failed");
+        }
     }
     std::fprintf(stderr, "ggml backend: %s\n", ggml_backend_name(m->backend));
+    // Query a metadata-only representative op once per model. Backend names
+    // alone cannot distinguish Apple7 GPUs from older Intel/AMD Metal devices.
+    {
+        ggml_init_params probe_params = { ggml_tensor_overhead() * 3, nullptr, true };
+        ggml_context * probe = ggml_init(probe_params);
+        if (!probe) throw std::runtime_error("direct-conv capability probe allocation failed");
+        ggml_tensor * w = ggml_new_tensor_3d(probe, GGML_TYPE_F32, 3, 8, 16);
+        ggml_tensor * x = ggml_new_tensor_2d(probe, GGML_TYPE_F32, 32, 8);
+        ggml_tensor * y = ggml_conv_direct_1d(probe, w, x, nullptr, 1, 1, 0.0f);
+        m->supports_direct_conv = ggml_backend_supports_op(m->backend, y);
+        ggml_free(probe);
+    }
     if (ggml_backend_is_cpu(m->backend)) {
         ggml_backend_cpu_set_n_threads(m->backend, n_threads);
         // Persistent threadpool (pattern from KakaruHayate/game.cpp

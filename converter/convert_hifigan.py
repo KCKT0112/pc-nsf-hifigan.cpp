@@ -26,12 +26,34 @@ Only third-party deps are torch + gguf (Python package) + numpy.
 import argparse
 import json
 import os
+from typing import Optional
 
 import numpy as np
 import torch
 
 from gguf import GGUFWriter
 from gguf.constants import GGMLQuantizationType as QT
+
+
+# Official OpenVPI SingingVocoders v1.0.0 preset.  The release archive ships
+# the checkpoint and notices but no config.json, so keeping the published
+# architecture here makes that asset directly convertible.  Unknown
+# checkpoints still require an explicit --config; audio rates are not safely
+# inferable from tensor shapes alone.
+OFFICIAL_PRESETS = {
+    "pc_nsf_hifigan_44.1k_hop512_128bin_2025.02": {
+        "sampling_rate": 44100,
+        "hop_size": 512,
+        "num_mels": 128,
+        "upsample_initial_channel": 512,
+        "upsample_rates": [8, 8, 2, 2, 2],
+        "upsample_kernel_sizes": [16, 16, 4, 4, 4],
+        "resblock_kernel_sizes": [3, 7, 11],
+        "resblock_dilation_sizes": [[1, 3, 5], [1, 3, 5], [1, 3, 5]],
+        "mini_nsf": True,
+        "noise_sigma": 0.01,
+    },
+}
 
 
 def materialize_weight_norm(sd: dict):
@@ -51,6 +73,39 @@ def materialize_weight_norm(sd: dict):
             del sd[k]
             del sd[vk]
     return True
+
+
+def load_generator_state(obj: object) -> dict:
+    """Accept native generator checkpoints and Lightning-style state_dicts."""
+    if not isinstance(obj, dict):
+        raise RuntimeError("checkpoint root must be a dict")
+    if "generator" in obj:
+        return dict(obj["generator"])
+    if "state_dict" in obj:
+        prefix = "generator."
+        sd = {
+            k[len(prefix):]: v
+            for k, v in obj["state_dict"].items()
+            if k.startswith(prefix)
+        }
+        if sd:
+            return sd
+    raise RuntimeError("checkpoint has neither 'generator' nor generator.* entries in 'state_dict'")
+
+
+def load_config(ckpt_path: str, config_path: Optional[str]) -> dict:
+    """Read explicit architecture metadata, or a recognized official preset."""
+    if config_path:
+        with open(config_path, encoding="utf-8") as f:
+            return json.load(f)
+    stem = os.path.splitext(os.path.basename(ckpt_path))[0]
+    if stem in OFFICIAL_PRESETS:
+        print("using built-in config preset", stem)
+        return dict(OFFICIAL_PRESETS[stem])
+    raise RuntimeError(
+        "--config is required for this checkpoint; automatic config is only "
+        "available for: " + ", ".join(sorted(OFFICIAL_PRESETS))
+    )
 
 
 def conv1d_to_ggml(w: np.ndarray) -> np.ndarray:
@@ -92,6 +147,7 @@ def subpixel_to_ggml(ws: np.ndarray) -> np.ndarray:
 
 
 def write_gguf(path: str, arch: str, tensors: dict, meta: dict, dtype: str):
+    """Write GGUF metadata and kernels, retaining F32 biases in either precision."""
     writer = GGUFWriter(path, arch)
     for k, v in meta.items():
         if isinstance(v, str):
@@ -121,18 +177,19 @@ def write_gguf(path: str, arch: str, tensors: dict, meta: dict, dtype: str):
 
 
 def main():
+    """Convert a tensor checkpoint to the requested F32/F16 GGUF file."""
     ap = argparse.ArgumentParser()
     ap.add_argument("--ckpt", required=True, help="model.ckpt path")
-    ap.add_argument("--config", required=True, help="config.json path")
+    ap.add_argument("--config", help="config.json path (optional for a known official release)")
     ap.add_argument("--out", required=True, help="output .gguf path")
     ap.add_argument("--dtype", default="F32", choices=["F32", "F16"],
                     help="kernel dtype. F32 = exact golden default (weights AND compute in fp32); F16 = reserved for future fp16/bf16-trained checkpoints (bias always stays F32)")
     args = ap.parse_args()
 
     ckpt_dir = os.path.dirname(args.ckpt)
-    cfg = json.load(open(args.config))
-    obj = torch.load(args.ckpt, map_location="cpu", weights_only=False)
-    sd = dict(obj["generator"])
+    cfg = load_config(args.ckpt, args.config)
+    obj = torch.load(args.ckpt, map_location="cpu", weights_only=True)
+    sd = load_generator_state(obj)
     print("loading", ckpt_dir)
 
     materialize_weight_norm(sd)

@@ -93,8 +93,11 @@ git apply patches/learned-ops-ggml0190.patch            # 补丁一
 git apply patches/qvac-ops-ggml0190.patch               # 补丁二
 # git apply patches/metal-ops-ggml0190.patch            # 补丁三（Metal 可选，与补丁四正交）
 git apply patches/vulkan-conv-direct-1d-ggml0190.patch  # 补丁四
-git apply patches/vulkan-pipeline-cache-ggml0190.patch  # 补丁五（持久管线缓存；全新 GitHub clone 由 cmake/ApplyGgmlPatches.cmake 自动完成这五步，无需手敲）
+git apply patches/vulkan-pipeline-cache-ggml0190.patch  # 补丁五（持久管线缓存）
+git apply patches/metal-conv-direct-1d-ggml0190.patch   # 补丁六（Metal F32 implicit-GEMM direct conv）
 ```
+
+全新 GitHub clone 由 `cmake/ApplyGgmlPatches.cmake` 自动完成上述六步，无需手敲。
 
 运行（示意为 Windows cmd 风格；资产 `hifigan_f32.gguf` / `mel.bin` / `f0.bin` / `golden_f32.bin` / `cmp_align.py` 体积原因不入库）：
 
@@ -272,3 +275,52 @@ python cmp_align.py vk.f32
 ### 9.4 真相对齐:ggml worktree 谱系修正(法证)
 
 本会话发现旧 ggml worktree 谱系(`fd606d4` 系)只含补丁一内容 + 未入库的补丁四变体,长期缺失仓库补丁二/三的全部文件(CPU `ops.cpp` 478 行等 + 5 个 Vulkan shader + Metal 集成);此前全部存档数字即在该树上测得。已将该树保留为 `pre-canonical-backup`,主 worktree 重置到规范提交栈(补丁 1–4 = `57bf852`,+补丁五 = `b899edd`),并以差分证明缺失内容对本图是死代码:**声码器图不含任何 qvac 算子/Metal 组件,因此 §1/§6/§7/§8 全部存档数字与结论依然有效可比**(本节 9.2 的同位重测亦证实数值逐位一致)。
+
+## 10. Apple Metal 真机适配与基准（2026-08-31）
+
+环境：Apple M4、macOS 27.0、AppleClang 21、ggml v0.19.0 + 本仓五枚补丁、F32 GGUF。模型来自 OpenVPI `pc_nsf_hifigan_44.1k_hop512_128bin_2025.02.ckpt`；转换所得 GGUF SHA-256 为 `650471e4a75f782132822e622e2d0e9c5f2a1f4ae4d5ad7cf02b3ac830fcbe67`。输入为 1722 帧（输出 881664 采样，19.992 s）的同一用户音频前端结果。
+
+适配前的 Apple 默认构建与运行均不成立：`GGML_METAL_EMBED_LIBRARY=OFF` 要求额外安装 Xcode Metal Toolchain；改为嵌入 shader 后，运行又在 `IM2COL_FAST_1D` 被 Metal `supports_op` 拒绝并 abort。现已默认嵌入 shader，并把该算子映射到与普通 `IM2COL` 相同的 Metal kernel。Apple ARM64 CPU 同时避开仅 AVX2 优化、其余架构为标量回退的 `CONV_DIRECT_1D`，改走 im2col + mul_mat。
+
+| 后端 | `hifigan_run` | RTF | 相对实时 | 说明 |
+|---|---:|---:|---:|---|
+| CPU，8 线程，修正 ARM64 门控 | 中位 **12.531 s**（n=4：12.582 / 12.480 / 12.591 / 12.265） | 0.627 | 1.60× | 模型单次加载、连续 4 次 |
+| Metal，Apple M4 | **6.828–8.911 s** | 0.342–0.446 | 2.24–2.93× | 独立进程正常机器状态；极端压力后的热降频数据不混入 |
+
+按同批 CPU 中位数，Metal 加速为 **1.41–1.84×**。0.372 s 短样本在模型单次加载后连续 4 次为 102.5 / 98.9 / 98.0 / 96.5 ms，验证重复调用可用。嵌入 shader 的全新首次运行时编译在本机曾为 7.815 s；系统缓存热后库加载为 9–46 ms，因此部署侧应区分首次启动与图执行。
+
+精度（同一 881664 采样，对本机 PyTorch CPU 参考）：
+
+| 后端 | corr | max\|Δ\| | RMS Δ | p99.9\|Δ\| |
+|---|---:|---:|---:|---:|
+| ggml CPU | 0.999999999999 | 3.177e-06 | 1.100e-07 | 7.674e-07 |
+| Metal | 0.999999287801 | 3.794e-03 | 9.903e-05 | 1.094e-03 |
+
+Metal 多次独立进程输出 SHA-256 均为 `d5f365f189c90fb0ccad339e3a7c196d3de016b3b959c886e5afa57335ad94e8`，结果确定且全部有限。关闭 Metal fast-math 会使 20 s 样本超过 16 分钟仍未完成，故维持 ggml 默认数学模式；Metal 是 GPU EP 级近似，不宣称 CPU bit-exact。
+
+## 11. Metal 极致优化：implicit-GEMM direct conv（2026-08-31）
+
+对 §10 同一 Apple M4、同一 F32 GGUF 和 1722 帧输入做逐节点 profile：旧图的 97 个 `IM2COL_FAST_1D` 合计约 **4295 ms**，98 个 `MUL_MAT` 合计约 **974 ms**，另有 154 个 ADD、96 个 LEAKY_RELU 和 18 个 CONT。瓶颈不是算力，而是为每个卷积物化巨型 im2col 张量并反复读写统一内存。
+
+补丁六为 Metal 实现 `GGML_OP_CONV_DIRECT_1D`：
+
+- F32 simdgroup-matrix implicit GEMM，不再物化 im2col；
+- bias、residual、输出 leaky-ReLU、输入 scale/leaky 全部折入同一 kernel；
+- 按逻辑输出通道选择 `16x64`、`32x64`、`64x64` tile；`OC < 8` 使用连续时间轴 scalar kernel，避免 `conv_post` 的空矩阵行；
+- K tile 为 8；累加完成后复用权重/输入 shared memory 作为输出 spill，使 `64x64` 从 20 KiB 降至 16 KiB。
+
+最终图从 **989 个节点降至 152 个节点**，97 个卷积直接执行。20 秒样本在模型单次加载后连续四次：
+
+| 路径 | `hifigan_run` | 相对旧 Metal | 相对实时 |
+|---|---:|---:|---:|
+| 旧 Metal `im2col + mul_mat` | 6.828–8.911 s | 1.00x | 2.24–2.93x |
+| direct conv，`32x64` 热态 | 1.042–1.051 s | 6.50–8.55x | 19.0–19.2x |
+| **direct conv，最终 `64x64`** | **0.823–0.836 s** | **8.17–10.83x** | **23.9–24.3x** |
+
+0.372 秒短样本连续四次为 **30.0 / 20.2 / 20.2 / 20.1 ms**；旧 Metal 为 102.5 / 98.9 / 98.0 / 96.5 ms。
+
+同日较晚的提交前复测遇到明显机器状态漂移：相同源码、相同输入的常驻进程四次为 **1.310 / 1.350 / 1.313 / 1.310 s**，先前独立干净构建的同源码二进制也同步漂移到 **1.383 s**；两者输出与上述 0.823–0.836 s 调优轮逐位一致。因此这里同时保留最快稳定轮和复测轮，不把主机功耗/温度状态变化误记成代码回归。
+
+精度相对同机 ggml CPU 参考：`corr=0.9999999999994206`、`max|Delta|=2.693e-06`、`RMS=8.919e-08`、`p99.9|Delta|=7.562e-07`。短样本与 direct-conv 调优各候选输出逐位一致；最终路径保持 F32，不用半精度换速度。
+
+调优中的负结果也保留为边界：`64x32` 约 1.412 s，K tile 16 约 1.615 s，`128x64` 约 1.37–2.04 s，`64x128` 约 4.12 s；把 sub-pixel phase-interleave/crop 融入卷积 epilogue 会造成非合并写，约 1.35 s，故均未进入默认实现。`PCNSF_DIRECT_CONV=0` 可回退旧路径做 A/B。

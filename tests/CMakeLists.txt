@@ -39,6 +39,20 @@ pcnsf_add_test(t01_mel_ng      test_mel_ng        test_mel.cpp)
 pcnsf_add_test(t02_mel_nvstft  test_mel_nvstft    test_mel_nvstft.cpp)
 pcnsf_add_test(t03_source      test_source        test_source.cpp)
 pcnsf_add_test(t04_gguf_meta   test_gguf_meta     test_gguf_meta.cpp)
+pcnsf_add_test(t06_backend_policy test_backend_policy test_backend_policy.cpp)
+pcnsf_add_test(t07_audio_ops test_audio_op_regressions test_audio_op_regressions.cpp)
+execute_process(COMMAND ${Python3_EXECUTABLE} -c "import torch, gguf"
+    RESULT_VARIABLE _pcnsf_converter_deps OUTPUT_QUIET ERROR_QUIET)
+if(_pcnsf_converter_deps EQUAL 0)
+    add_test(NAME converter COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/test_converter.py)
+endif()
+add_test(NAME patch_upgrade COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/test_patch_upgrade.py
+    --cmake ${CMAKE_COMMAND} --ggml ${ggml_SOURCE_DIR} --mininsf ${mininsf_SOURCE_DIR}
+    --pocketfft ${pocketfft_SOURCE_DIR} --dr-libs ${dr_libs_SOURCE_DIR})
+# Metadata tests do not exercise GPU kernels.  Force CPU before backend
+# probing so they also run in sandboxed/headless macOS environments where a
+# Metal command queue cannot be created.
+set_tests_properties(t04_gguf_meta PROPERTIES ENVIRONMENT "PCNSF_BACKEND=cpu")
 
 # optional end-to-end vocode test driven by PCNSF_MODEL_GGUF
 if(DEFINED ENV{PCNSF_MODEL_GGUF})
@@ -47,5 +61,12 @@ if(DEFINED ENV{PCNSF_MODEL_GGUF})
     target_compile_definitions(test_vocode PRIVATE
         PCNSF_MODEL_GGUF="$ENV{PCNSF_MODEL_GGUF}" PCNSF_GOLDEN_DIR="${PCNSF_GOLDEN_DIR}")
     add_test(NAME t05_vocode COMMAND test_vocode)
-    set_tests_properties(t05_vocode PROPERTIES FIXTURES_REQUIRED golden LABELS "e2e")
+    add_test(NAME t05_vocode_f16_forced COMMAND test_vocode F16)
+    add_test(NAME t05_vocode_kernel_fallback COMMAND test_vocode F32 compare-min-k)
+    set_tests_properties(t05_vocode PROPERTIES
+        FIXTURES_REQUIRED golden LABELS "e2e" ENVIRONMENT "PCNSF_BACKEND=cpu")
+    set_tests_properties(t05_vocode_f16_forced PROPERTIES FIXTURES_REQUIRED golden LABELS "e2e"
+        ENVIRONMENT "PCNSF_BACKEND=cpu;PCNSF_DIRECT_CONV=1;PCNSF_FUSE_IO=1")
+    set_tests_properties(t05_vocode_kernel_fallback PROPERTIES FIXTURES_REQUIRED golden LABELS "e2e"
+        ENVIRONMENT "PCNSF_BACKEND=cpu;PCNSF_DIRECT_CONV=1;PCNSF_FUSE_IO=1;PCNSF_DIRECT_MIN_K=1")
 endif()

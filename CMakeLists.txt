@@ -18,8 +18,11 @@ option(PCNSF_BUILD_BENCHMARK "Build pcnsf_benchmark executable" OFF)
 # On Apple, default to Metal backend on. Use PCNSF_METAL to override.
 if(APPLE)
     option(PCNSF_METAL "Enable ggml Metal backend" ON)
+    option(PCNSF_METAL_EMBED_LIBRARY
+           "Embed Metal shader source (no separately installed Metal Toolchain required)" ON)
 else()
     option(PCNSF_METAL "Enable ggml Metal backend" OFF)
+    option(PCNSF_METAL_EMBED_LIBRARY "Embed Metal shader source" OFF)
 endif()
 
 # -----------------------------------------------------------------------------
@@ -227,6 +230,7 @@ install(TARGETS pc_nsf_hifigan
 message(STATUS "")
 message(STATUS "pc_nsf_hifigan ${PROJECT_VERSION} configuration:")
 message(STATUS "  Metal .............. ${PCNSF_METAL}")
+message(STATUS "  Metal shader embed . ${PCNSF_METAL_EMBED_LIBRARY}")
 message(STATUS "  CUDA ............... ${PCNSF_CUDA}")
 message(STATUS "  Vulkan ............. ${PCNSF_VULKAN}")
 message(STATUS "  Build CLI .......... ${PCNSF_BUILD_CLI}")
