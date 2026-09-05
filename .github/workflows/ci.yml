@@ -72,6 +72,9 @@ jobs:
           -DPCNSF_VULKAN=ON -DPCNSF_METAL=OFF -DPCNSF_BUILD_CLI=OFF
       - run: cmake --build build-vulkan --parallel 2 --target test_audio_op_regressions
       - name: CPU and Vulkan operator regressions (Mesa software device)
+        env:
+          # ggml excludes CPU-class Vulkan devices unless explicitly selected.
+          GGML_VK_VISIBLE_DEVICES: "0"
         run: |
           build-vulkan/bin/test_audio_op_regressions CPU
           build-vulkan/bin/test_audio_op_regressions Vulkan0
