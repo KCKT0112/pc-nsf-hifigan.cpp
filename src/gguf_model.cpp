@@ -43,6 +43,18 @@ std::unique_ptr<GGUFModel> gguf_load(const std::string & path, int n_threads) {
         }
     }
     std::fprintf(stderr, "ggml backend: %s\n", ggml_backend_name(m->backend));
+    // Query a metadata-only representative op once per model. Backend names
+    // alone cannot distinguish Apple7 GPUs from older Intel/AMD Metal devices.
+    {
+        ggml_init_params probe_params = { ggml_tensor_overhead() * 3, nullptr, true };
+        ggml_context * probe = ggml_init(probe_params);
+        if (!probe) throw std::runtime_error("direct-conv capability probe allocation failed");
+        ggml_tensor * w = ggml_new_tensor_3d(probe, GGML_TYPE_F32, 3, 8, 16);
+        ggml_tensor * x = ggml_new_tensor_2d(probe, GGML_TYPE_F32, 32, 8);
+        ggml_tensor * y = ggml_conv_direct_1d(probe, w, x, nullptr, 1, 1, 0.0f);
+        m->supports_direct_conv = ggml_backend_supports_op(m->backend, y);
+        ggml_free(probe);
+    }
     if (ggml_backend_is_cpu(m->backend)) {
         ggml_backend_cpu_set_n_threads(m->backend, n_threads);
         // Persistent threadpool (pattern from KakaruHayate/game.cpp

@@ -93,6 +93,7 @@ def load_generator_state(obj: object) -> dict:
 
 
 def load_config(ckpt_path: str, config_path: Optional[str]) -> dict:
+    """Read explicit architecture metadata, or a recognized official preset."""
     if config_path:
         with open(config_path, encoding="utf-8") as f:
             return json.load(f)
@@ -145,6 +146,7 @@ def subpixel_to_ggml(ws: np.ndarray) -> np.ndarray:
 
 
 def write_gguf(path: str, arch: str, tensors: dict, meta: dict, dtype: str):
+    """Write GGUF metadata and kernels, retaining F32 biases in either precision."""
     writer = GGUFWriter(path, arch)
     for k, v in meta.items():
         if isinstance(v, str):
@@ -174,6 +176,7 @@ def write_gguf(path: str, arch: str, tensors: dict, meta: dict, dtype: str):
 
 
 def main():
+    """Convert a tensor checkpoint to the requested F32/F16 GGUF file."""
     ap = argparse.ArgumentParser()
     ap.add_argument("--ckpt", required=True, help="model.ckpt path")
     ap.add_argument("--config", help="config.json path (optional for a known official release)")
@@ -184,7 +187,7 @@ def main():
 
     ckpt_dir = os.path.dirname(args.ckpt)
     cfg = load_config(args.ckpt, args.config)
-    obj = torch.load(args.ckpt, map_location="cpu", weights_only=False)
+    obj = torch.load(args.ckpt, map_location="cpu", weights_only=True)
     sd = load_generator_state(obj)
     print("loading", ckpt_dir)
 

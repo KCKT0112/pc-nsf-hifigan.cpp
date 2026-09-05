@@ -1,0 +1,11 @@
+diff --git a/src/ggml-metal/ggml-metal-device.m b/src/ggml-metal/ggml-metal-device.m
+--- a/src/ggml-metal/ggml-metal-device.m
++++ b/src/ggml-metal/ggml-metal-device.m
+@@ -1239,6 +1239,7 @@
+         case GGML_OP_ROPE_BACK:
+             return true;
+         case GGML_OP_IM2COL:
++        case GGML_OP_IM2COL_FAST_1D:
+             return ggml_is_contiguous(op->src[1]) && op->src[1]->type == GGML_TYPE_F32 && (op->type == GGML_TYPE_F16 || op->type == GGML_TYPE_F32);
+         case GGML_OP_CONV_2D:
+             return ggml_is_contiguous(op->src[0]) &&

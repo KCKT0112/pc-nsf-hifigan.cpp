@@ -9,8 +9,8 @@
 #include <cmath>
 #include <vector>
 
-int main() {
-    pc_nsf_hifigan::HifiganModel m(PCNSF_MODEL_GGUF, 4);
+int main(int argc, char ** argv) {
+    pc_nsf_hifigan::HifiganModel m(PCNSF_MODEL_GGUF, 4, argc > 1 ? argv[1] : "F32");
 
     const int T = m.hop_size > 512 ? 128 : 96;   // keep short for CI speed
     std::vector<float> mel(T * m.num_mels, -11.0f);

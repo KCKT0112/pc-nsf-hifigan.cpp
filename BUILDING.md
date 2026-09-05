@@ -41,6 +41,18 @@ At runtime, `PCNSF_BACKEND=cpu` forces the CPU backend before any GPU is
 initialized. With the variable unset (or set to `auto`), ggml selects the best
 available backend; on Apple Silicon builds this is Metal.
 
+Fused direct convolution is enabled only for F32 and a Metal device reporting
+support for `CONV_DIRECT_1D` (including simdgroup-matrix capability). Unsupported
+Metal devices keep the im2col path. `PCNSF_DIRECT_CONV=1` cannot bypass these
+requirements. `PCNSF_DIRECT_CONV=0` disables direct convolution for comparison.
+
+The seven-patch stack is verified before ggml configuration on every CMake run,
+including populated build trees and `FETCHCONTENT_SOURCE_DIR_GGML` overrides.
+A small compatibility backfill handles old trees missing Metal's im2col alias.
+Patch 7 fixes CPU/Vulkan scatter index bounds, transposed-convolution padding,
+and CPU direct-convolution weight/bias strides.
+
+
 ## Vulkan / CUDA
 
 Libraries and executables auto-detect and link. Runtime requirements:

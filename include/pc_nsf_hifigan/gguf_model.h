@@ -25,6 +25,7 @@ struct GGUFModel {
     gguf_context * gguf   = nullptr;
     ggml_context * meta   = nullptr;
     ggml_backend_t backend = nullptr;
+    bool supports_direct_conv = false; // cached device capability, including Metal simdgroup matrices
     ggml_backend_buffer_t buf = nullptr;
     ggml_threadpool_t tpool = nullptr;  // CPU backends only; borrowed by backend
     std::unordered_map<std::string, ggml_tensor *> tensors;

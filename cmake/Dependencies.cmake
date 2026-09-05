@@ -27,14 +27,12 @@ set(GGML_METAL_EMBED_LIBRARY ${PCNSF_METAL_EMBED_LIBRARY}
 # by KakaruHayate/ggml-audio-patch (ggml_conv_direct_1d / *_fused /
 # ggml_add_leaky_relu).  "No patches applied here" was true when hifigan.cpp
 # was I/O-only; it is false now.  We vendor a byte-identical snapshot of the
-# 6 shipped patches into ./patches/ and have FetchContent apply them
-# idempotently on first populate.  Keeping them as files (not a ggml fork)
+# 7 shipped patches into ./patches/ and have FetchContent apply them
+# idempotently on every configure.  Keeping them as files (not a ggml fork)
 # preserves the D2 intent: ggml remains stock upstream, the diff lives here.
 #
-# Idempotency: FetchContent PATCH_COMMAND runs only on first populate; second
-# configure of the same build dir skips it (ggml-subbuild stamp).  The
-# `git apply --check || git apply -R --check` pattern tolerates the corner
-# case where the build dir keeps its _deps but the stamp was wiped.
+# Keep the initial PATCH_COMMAND for clean downloads, and verify again before
+# add_subdirectory on every configure (including populated and source-override trees).
 set(_pcnsf_ggml_patch_dir "${CMAKE_CURRENT_SOURCE_DIR}/patches")
 set(_pcnsf_ggml_patch_1 "${_pcnsf_ggml_patch_dir}/learned-ops-ggml0190.patch")
 set(_pcnsf_ggml_patch_2 "${_pcnsf_ggml_patch_dir}/qvac-ops-ggml0190.patch")
@@ -42,7 +40,13 @@ set(_pcnsf_ggml_patch_3 "${_pcnsf_ggml_patch_dir}/metal-ops-ggml0190.patch")
 set(_pcnsf_ggml_patch_4 "${_pcnsf_ggml_patch_dir}/vulkan-conv-direct-1d-ggml0190.patch")
 set(_pcnsf_ggml_patch_5 "${_pcnsf_ggml_patch_dir}/vulkan-pipeline-cache-ggml0190.patch")
 set(_pcnsf_ggml_patch_6 "${_pcnsf_ggml_patch_dir}/metal-conv-direct-1d-ggml0190.patch")
-foreach(_p IN ITEMS "${_pcnsf_ggml_patch_1}" "${_pcnsf_ggml_patch_2}" "${_pcnsf_ggml_patch_3}" "${_pcnsf_ggml_patch_4}" "${_pcnsf_ggml_patch_5}" "${_pcnsf_ggml_patch_6}")
+set(_pcnsf_ggml_patch_7 "${_pcnsf_ggml_patch_dir}/audio-op-fixes-ggml0190.patch")
+set(_pcnsf_ggml_alias_patch "${CMAKE_CURRENT_SOURCE_DIR}/cmake/patches/metal-im2col-support.patch")
+set(_pcnsf_patch_args "-DGGML_PATCH_METAL_IM2COL=${_pcnsf_ggml_alias_patch}")
+foreach(_i RANGE 1 7)
+    list(APPEND _pcnsf_patch_args "-DGGML_PATCH_${_i}=${_pcnsf_ggml_patch_${_i}}")
+endforeach()
+foreach(_p IN ITEMS "${_pcnsf_ggml_patch_1}" "${_pcnsf_ggml_patch_2}" "${_pcnsf_ggml_patch_3}" "${_pcnsf_ggml_patch_4}" "${_pcnsf_ggml_patch_5}" "${_pcnsf_ggml_patch_6}" "${_pcnsf_ggml_patch_7}" "${_pcnsf_ggml_alias_patch}")
     if(NOT EXISTS "${_p}")
         message(FATAL_ERROR "ggml patch snapshot missing: ${_p} — sync the vendored snapshot from KakaruHayate/ggml-audio-patch (patches/)")
     endif()
@@ -53,21 +57,28 @@ FetchContent_Declare(
     GIT_REPOSITORY https://github.com/ggerganov/ggml.git
     GIT_TAG        v0.19.0
     GIT_SHALLOW    TRUE
-    # NOTE: pass each patch as its own -D.  A ;-separated list inside one -D
-    # would be re-split when ExternalProject materialises PATCH_COMMAND into
-    # its subbuild script, silently dropping patches 2..6.  Enumerated vars
-    # are immune to that.
-    PATCH_COMMAND  ${CMAKE_COMMAND}
-                   -DGGML_SOURCE_DIR=<SOURCE_DIR>
-                   "-DGGML_PATCH_1=${_pcnsf_ggml_patch_1}"
-                   "-DGGML_PATCH_2=${_pcnsf_ggml_patch_2}"
-                   "-DGGML_PATCH_3=${_pcnsf_ggml_patch_3}"
-                   "-DGGML_PATCH_4=${_pcnsf_ggml_patch_4}"
-                   "-DGGML_PATCH_5=${_pcnsf_ggml_patch_5}"
-                   "-DGGML_PATCH_6=${_pcnsf_ggml_patch_6}"
-                   -P "${CMAKE_CURRENT_SOURCE_DIR}/cmake/ApplyGgmlPatches.cmake"
+    # Populate without configuring ggml until the source has been verified.
+    SOURCE_SUBDIR pcnsf-deferred-configure
+    PATCH_COMMAND ${CMAKE_COMMAND} -DGGML_SOURCE_DIR=<SOURCE_DIR>
+                  ${_pcnsf_patch_args}
+                  -P "${CMAKE_CURRENT_SOURCE_DIR}/cmake/ApplyGgmlPatches.cmake"
 )
 FetchContent_MakeAvailable(ggml)
+execute_process(
+    COMMAND ${CMAKE_COMMAND} "-DGGML_SOURCE_DIR=${ggml_SOURCE_DIR}"
+            ${_pcnsf_patch_args}
+            -P "${CMAKE_CURRENT_SOURCE_DIR}/cmake/ApplyGgmlPatches.cmake"
+    RESULT_VARIABLE _pcnsf_patch_result)
+if(NOT _pcnsf_patch_result EQUAL 0)
+    message(FATAL_ERROR "ggml patch verification failed; refusing to configure an incomplete source tree")
+endif()
+if(NOT TARGET ggml)
+    add_subdirectory("${ggml_SOURCE_DIR}" "${ggml_BINARY_DIR}")
+endif()
+unset(_pcnsf_patch_args)
+unset(_pcnsf_patch_result)
+unset(_pcnsf_ggml_alias_patch)
+unset(_pcnsf_ggml_patch_7)
 unset(_pcnsf_ggml_patch_dir)
 unset(_pcnsf_ggml_patch_1)
 unset(_pcnsf_ggml_patch_2)

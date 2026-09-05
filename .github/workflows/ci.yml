@@ -45,3 +45,33 @@ jobs:
       - name: CTest all incl extras
         working-directory: build
         run: ctest --output-on-failure -C Release
+
+  converter:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - run: python -m pip install numpy gguf
+      - run: python -m pip install torch --index-url https://download.pytorch.org/whl/cpu
+      - run: python tests/test_converter.py
+
+  vulkan-regressions:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - run: sudo apt-get update && sudo apt-get install -y libvulkan-dev mesa-vulkan-drivers glslc
+      - run: python -m pip install numpy gguf
+      - name: Configure Vulkan
+        run: >
+          cmake -S . -B build-vulkan -DCMAKE_BUILD_TYPE=Release
+          -DPCNSF_VULKAN=ON -DPCNSF_METAL=OFF -DPCNSF_BUILD_CLI=OFF
+      - run: cmake --build build-vulkan --parallel 2 --target test_audio_op_regressions
+      - name: CPU and Vulkan operator regressions (Mesa software device)
+        run: |
+          build-vulkan/bin/test_audio_op_regressions CPU
+          build-vulkan/bin/test_audio_op_regressions Vulkan0

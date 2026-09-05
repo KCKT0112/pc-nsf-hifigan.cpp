@@ -1,4 +1,5 @@
 #include "pc_nsf_hifigan/hifigan.h"
+#include "backend_policy.h"
 
 #include <mininsf/mininsf.h>
 
@@ -34,7 +35,11 @@ ggml_tensor * conv1d_f32(ggml_context * ctx, ggml_tensor * w, ggml_tensor * x,
     ggml_tensor * im = ggml_im2col_fast_1d(ctx, w, x, 1, pad, dil, GGML_TYPE_F32, 16);
     ggml_tensor * m0 = ggml_reshape_2d(ctx, im, im->ne[0], (im->ne[2] * im->ne[1]));
     ggml_tensor * wm = ggml_reshape_2d(ctx, w, (w->ne[0] * w->ne[1]), w->ne[2]);
-    ggml_tensor * r = ggml_mul_mat(ctx, m0, wm);
+    // Keep the established F32 orientation. F16 weights must be operand A:
+    // the CPU mul_mat implementation requires an F32 activation operand B.
+    ggml_tensor * r = w->type == GGML_TYPE_F32
+        ? ggml_mul_mat(ctx, m0, wm)
+        : ggml_cont(ctx, ggml_transpose(ctx, ggml_mul_mat(ctx, wm, m0)));
     r = ggml_reshape_3d(ctx, r, im->ne[1], w->ne[2], im->ne[2]);
     r = ggml_reshape_2d(ctx, r, r->ne[0], r->ne[1]);
     if (r->ne[0] != OL) {
@@ -91,21 +96,10 @@ inline bool fused_site_conv(const GGUFModel & m, char site) {
 // fold bias/residual/leaky/input-scale into the same device pass.  Metal uses
 // simdgroup matrices and never materializes the very large im2col tensors.
 // PCNSF_DIRECT_CONV=0 falls back to the im2col path for A/B.
-inline bool is_metal_backend(const GGUFModel & m) {
-    const char * backend_name = ggml_backend_name(m.backend);
-    if (!backend_name) return false;
-    return std::strstr(backend_name, "Metal") != nullptr ||
-           std::strncmp(backend_name, "MTL", 3) == 0;
-}
-
 inline bool use_direct_conv(const GGUFModel & m, ggml_type ctype) {
-    const char * v = getenv("PCNSF_DIRECT_CONV");
-    if (v) return v[0] != '0';
-    if (ctype != GGML_TYPE_F32) return false;
-    const char * backend_name = ggml_backend_name(m.backend);
-    if (!backend_name) return false;
-    if (std::strstr(backend_name, "Vulkan") != nullptr || is_metal_backend(m)) return true;
-    return std::strcmp(backend_name, "CPU") == 0 && ggml_cpu_has_avx2();
+    return detail::direct_conv_enabled(ctype, ggml_backend_name(m.backend),
+                                      m.supports_direct_conv, ggml_cpu_has_avx2(),
+                                      getenv("PCNSF_DIRECT_CONV"));
 }
 
 // The Vulkan conv_direct_1d shader (vulkan-shaders/conv_direct_1d.comp:78-84)
@@ -140,9 +134,10 @@ inline bool direct_conv_k_ok(const GGUFModel & m, ggml_type ctype, int64_t kerne
 //   r: residual add (convs2 epilogue adds the running h)
 // PCNSF_FUSE_IO=0 disables all; i/s/r select single sites for bisect.
 inline bool use_fuse_io(const GGUFModel & m, ggml_type ctype) {
+    if (!use_direct_conv(m, ctype)) return false;
     const char * v = getenv("PCNSF_FUSE_IO");
     if (v) return v[0] != '0';
-    return use_direct_conv(m, ctype);   // CPU direct-conv line only
+    return true;
 }
 
 inline bool fuse_io_site(const GGUFModel & m, char site) {

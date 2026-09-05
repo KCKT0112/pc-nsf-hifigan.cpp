@@ -6,7 +6,7 @@
 # Why NOT `git apply -R --check` for idempotency: the patches overlap
 # contextually (e.g. the op-name table in src/ggml.c grows with each patch,
 # and patches 4/5 both edit src/ggml-vulkan/ggml-vulkan.cpp).
-# After applying 1..6 in order, `git apply -R --check patch_1` fails because
+# After applying 1..7 in order, `git apply -R --check patch_1` fails because
 # patch_2's additions sit in patch_1's context lines.  Reverse order would
 # work only as a strictly nested unwind — too fragile for a guard check.
 #
@@ -38,7 +38,9 @@ set(_specs
     "GGML_PATCH_3|src/ggml-metal/ggml-metal-device.cpp|kernel_supertonic_pw2_residual"
     "GGML_PATCH_4|src/ggml-vulkan/vulkan-shaders/conv_direct_1d.comp|XS_ROWS"
     "GGML_PATCH_5|src/ggml-vulkan/ggml-vulkan.cpp|GGML_VK_PIPELINE_CACHE_PATH"
-    "GGML_PATCH_6|src/ggml-metal/ggml-metal.metal|kernel_conv_direct_1d_f32_64x64")
+    "GGML_PATCH_METAL_IM2COL|src/ggml-metal/ggml-metal-device.m|case GGML_OP_IM2COL_FAST_1D:"
+    "GGML_PATCH_6|src/ggml-metal/ggml-metal.metal|kernel_conv_direct_1d_f32_64x64"
+    "GGML_PATCH_7|src/ggml-cpu/ops.cpp|int64_t scatter_index = idx")
 
 set(_n_applied 0)
 set(_n_skipped 0)

@@ -20,17 +20,17 @@
 
 ```bash
 # 1. 转换（PT checkpoint -> GGUF；需 torch + gguf）
-python converter/convert_hifigan.py --ckpt model.ckpt --config config.json --out hifigan.gguf
+python converter/convert_hifigan.py --ckpt model.ckpt --config config.json --out hifigan_f32.gguf --dtype F32
 # OpenVPI 官方 pc_nsf_hifigan_44.1k_hop512_128bin_2025.02.ckpt 的发布包
 # 不含 config.json，转换器已内置该版本参数：
-python converter/convert_hifigan.py --ckpt pc_nsf_hifigan_44.1k_hop512_128bin_2025.02.ckpt --out hifigan.gguf
+python converter/convert_hifigan.py --ckpt pc_nsf_hifigan_44.1k_hop512_128bin_2025.02.ckpt --out hifigan_f32.gguf --dtype F32
 
 # 2. 构建（见 BUILDING.md）
 cmake -S . -B build -D CMAKE_BUILD_TYPE=Release
 cmake --build build -j
 
 # 3. vocode（mel.bin + f0.bin -> out.wav）
-build/bin/hifigan_cli hifigan.gguf mel.bin f0.bin out.wav
+build/bin/hifigan_cli hifigan_f32.gguf mel.bin f0.bin out.wav
 #    F16 线路（需 --dtype F16 的 GGUF）：
 # HF_PRECISION=F16 build/bin/hifigan_cli hifigan_f16.gguf mel.bin f0.bin out_f16.wav
 ```
@@ -78,7 +78,7 @@ build/bin/hifigan_cli hifigan.gguf mel.bin f0.bin out.wav
 ### 贡献者
 
 - **无量化路径** — 本仓库**刻意不量化**：vocoder 对数值敏感，仅保留 F16/F32；未来 fp16 训练试点先在 torch 侧验证
-- **依赖策略（D2-修订,2026-08-30）** — 上游不接受的 ggml 修改 → 进 `ggml-patch`（补丁集）。**修订**：本仓库 vocoder 主体现已消费补丁提供的新算子（`ggml_conv_direct_1d[_fused]`、`ggml_add_leaky_relu`），故 6 枚补丁快照（learned ops、qvac ops、Metal ops、Vulkan direct convolution / pipeline cache、Metal direct convolution）vendored 于 `./patches/`，在 FetchContent 拉取 stock ggml v0.19.0 后由 `cmake/ApplyGgmlPatches.cmake` 幂等打上。干净 checkout 全平台免手工可构建；本地已手工打过补丁的目录树会被识别并收养（stamp: `.pcnsf-patches/`)。补丁收益见 `docs/benchmarks.md`
+- **依赖策略（D2-修订,2026-08-30）** — 上游不接受的 ggml 修改 → 进 `ggml-patch`（补丁集）。**修订**：本仓库 vocoder 主体现已消费补丁提供的新算子（`ggml_conv_direct_1d[_fused]`、`ggml_add_leaky_relu`），故 7 枚补丁快照（learned ops、qvac ops、Metal ops、Vulkan direct convolution / pipeline cache、Metal direct convolution、音频算子正确性修复）vendored 于 `./patches/`，在 FetchContent 拉取 stock ggml v0.19.0 后由 `cmake/ApplyGgmlPatches.cmake` 幂等打上。干净 checkout 全平台免手工可构建；本地已手工打过补丁的目录树会被识别并收养（stamp: `.pcnsf-patches/`)。补丁收益见 `docs/benchmarks.md`
 - **提交前过数值门槛** — 提交前跑 `tests/` golden 对比（`gen_hifigan_golden.py` + CTest t01/t02），wav 输出须与 torch 参考一致
 - **mininsf 源同步** — source generator 改动在 `libmininsf` 仓库，本仓库只消费（FetchContent）
 
