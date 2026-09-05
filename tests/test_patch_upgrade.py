@@ -70,7 +70,7 @@ FetchContent_MakeAvailable(ggml)
                       f"-DFETCHCONTENT_SOURCE_DIR_POCKETFFT={args.pocketfft}",
                       f"-DFETCHCONTENT_SOURCE_DIR_DR_LIBS={args.dr_libs}"]
         run(configure)
-        for patch in ["6", "7", "METAL_IM2COL"]:
+        for patch in ["6", "7", "8", "METAL_IM2COL"]:
             assert (stamps / f"GGML_PATCH_{patch}.stamp").exists(), patch
         assert "case GGML_OP_IM2COL_FAST_1D:" in device.read_text()
         assert "kernel_conv_direct_1d_f32_64x64" in (source / "src/ggml-metal/ggml-metal.metal").read_text()

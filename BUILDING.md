@@ -46,7 +46,7 @@ support for `CONV_DIRECT_1D` (including simdgroup-matrix capability). Unsupporte
 Metal devices keep the im2col path. `PCNSF_DIRECT_CONV=1` cannot bypass these
 requirements. `PCNSF_DIRECT_CONV=0` disables direct convolution for comparison.
 
-The seven-patch stack is verified before ggml configuration on every CMake run,
+The eight-patch stack is verified before ggml configuration on every CMake run,
 including populated build trees and `FETCHCONTENT_SOURCE_DIR_GGML` overrides.
 A small compatibility backfill handles old trees missing Metal's im2col alias.
 Patch 7 fixes CPU/Vulkan scatter index bounds, transposed-convolution padding,

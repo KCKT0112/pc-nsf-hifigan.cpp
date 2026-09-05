@@ -10,7 +10,7 @@
 - **CPU**：Xeon E5-2675 v3 @ 16 线程（AVX2）
 - **GPU**：RTX 2070 (Turing)
 - **工具链**：MSVC 2019 14.29 / Ninja
-- **ggml 基线**：v0.19.0 + 本仓库七枚补丁（含 Vulkan / Metal direct-conv 后端）
+- **ggml 基线**：v0.19.0 + 本仓库八枚补丁（含 Vulkan / Metal direct-conv 后端）
 - **commit 锚定**：见 `docs/benchmarks.md` 各节引用（如 `f94c1d1`、`3ff3998` 等）
 
 你的本地结果可能因微架构、驱动版本、线程调度而异。
@@ -195,7 +195,7 @@ C# 侧把 `float[]` 固定后传入，或改用 `SafeBuffer` / `Span<float>`（.
 - **ggml**（张量后端）：[ggml-org/ggml](https://github.com/ggml-org/ggml)
 - **ggml-audio-patch**（`patches/` 中随库保存的补丁来源，不是 FetchContent 依赖）：[KakaruHayate/ggml-audio-patch](https://github.com/KakaruHayate/ggml-audio-patch)
 
-CMake 首次配置时会自动下载 stock ggml v0.19.0，并依次应用 `patches/` 下的七枚补丁（learned ops、qvac ops、Metal ops、Vulkan direct convolution / pipeline cache、Metal direct convolution、音频算子正确性修复）。如果你需要修改依赖源码（例如调试 sine 生成器或设备 shader），可通过 CMake 参数 `-DFETCHCONTENT_SOURCE_DIR_MININSF=/path/to/mininsf`、`-DFETCHCONTENT_SOURCE_DIR_GGML=/path/to/ggml` 指向本地 checkout。ggml 源码在每次配置时都会验证并补齐本仓库的补丁。
+CMake 首次配置时会自动下载 stock ggml v0.19.0，并依次应用 `patches/` 下的八枚补丁（learned ops、qvac ops、Metal ops、Vulkan direct convolution / pipeline cache、Metal direct convolution、音频算子正确性/工作区对齐修复）。如果你需要修改依赖源码（例如调试 sine 生成器或设备 shader），可通过 CMake 参数 `-DFETCHCONTENT_SOURCE_DIR_MININSF=/path/to/mininsf`、`-DFETCHCONTENT_SOURCE_DIR_GGML=/path/to/ggml` 指向本地 checkout。ggml 源码在每次配置时都会验证并补齐本仓库的补丁。
 
 构建步骤与平台注意事项见 `BUILDING.md`（以及 patch 仓的 `docs/building_zh.md`）。
 
