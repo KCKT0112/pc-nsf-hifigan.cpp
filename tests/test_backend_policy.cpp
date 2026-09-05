@@ -7,12 +7,13 @@ int main() {
         CHECK(!direct_conv_enabled(GGML_TYPE_F16, name, true, true, "1"));
         CHECK(!direct_conv_enabled(GGML_TYPE_BF16, name, true, true, "1"));
         CHECK(!direct_conv_enabled(GGML_TYPE_F32, name, true, true, "0"));
+        CHECK(!direct_conv_enabled(GGML_TYPE_F32, name, false, true, "1"));
     }
     CHECK(!direct_conv_enabled(GGML_TYPE_F32, "MTL0", false, false, nullptr));
     CHECK(!direct_conv_enabled(GGML_TYPE_F32, "Metal", false, false, "1"));
     CHECK(direct_conv_enabled(GGML_TYPE_F32, "MTL0", true, false, nullptr));
     CHECK(direct_conv_enabled(GGML_TYPE_F32, "MTL0", true, false, "1"));
-    CHECK(direct_conv_enabled(GGML_TYPE_F32, "Vulkan0", false, false, nullptr));
+    CHECK(direct_conv_enabled(GGML_TYPE_F32, "Vulkan0", true, false, nullptr));
     CHECK(direct_conv_enabled(GGML_TYPE_F32, "CPU", true, true, nullptr));
     CHECK(!direct_conv_enabled(GGML_TYPE_F32, "CPU", true, false, nullptr));
     CHECK(direct_conv_enabled(GGML_TYPE_F32, "CPU", true, false, "1"));

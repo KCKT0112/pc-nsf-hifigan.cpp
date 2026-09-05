@@ -184,6 +184,10 @@ ggml_tensor * conv1d_same(ggml_context * ctx, const GGUFModel & m, ggml_type cty
         return ggml_conv_direct_1d(ctx, w, x, gguf_get(m, prefix + ".bias"),
                                    pad, dilation, leaky_slope);
     }
+    // A caller may defer producers into this layer before applying the kernel
+    // threshold. If this convolution falls back, materialize those producers.
+    if (in_scale != 1.0f) x = ggml_scale(ctx, x, in_scale);
+    if (in_slope != 0.0f) x = ggml_leaky_relu(ctx, x, in_slope, false);
     if (use_manual_conv(m)) {
         y = conv1d_f32(ctx, w, x, pad, dilation);
     } else {
@@ -314,21 +318,22 @@ ggml_tensor * resblock(ggml_context * ctx, const GGUFModel & m, ggml_type ctype,
                        ggml_tensor * x, int rb_index) {
     // convs1 post-bias leaky: rides the direct-conv epilogue (CPU/Vulkan);
     // on the im2col fallback the fold needs the CPU ADD_LEAKY_RELU op
-    const bool dc     = use_direct_conv(m, ctype);
-    const bool fuse_c1 = dc ? fused_site_conv(m, 'c') : fused_site(m, 'c');
     const bool fio     = use_fuse_io(m, ctype);
-    const bool fio_i   = fio && fuse_io_site(m, 'i');
-    const bool fio_r   = fio && fuse_io_site(m, 'r');
     ggml_tensor * h = x;
     for (int k = 0; k < 3; ++k) {
         const int dil = k == 0 ? 1 : (k == 1 ? 3 : 5);
         char pre[96];
         std::snprintf(pre, sizeof pre, "hifigan.resblocks.%d.convs1.%d", rb_index, k);
+        const bool dc1 = direct_conv_k_ok(m, ctype, gguf_get(m, std::string(pre) + ".weight")->ne[0]);
+        const bool fuse_c1 = dc1 ? fused_site_conv(m, 'c') : fused_site(m, 'c');
+        const bool fio_i = dc1 && fio && fuse_io_site(m, 'i');
         ggml_tensor * xt = fio_i ? h : ggml_leaky_relu(ctx, h, 0.1f, false);
         xt = conv1d_same(ctx, m, ctype, pre, xt, dil, fuse_c1 ? 0.1f : 0.0f,
                          nullptr, 1.0f, fio_i ? 0.1f : 0.0f);
         if (!fuse_c1) xt = ggml_leaky_relu(ctx, xt, 0.1f, false);
         std::snprintf(pre, sizeof pre, "hifigan.resblocks.%d.convs2.%d", rb_index, k);
+        const bool dc2 = direct_conv_k_ok(m, ctype, gguf_get(m, std::string(pre) + ".weight")->ne[0]);
+        const bool fio_r = dc2 && fio && fuse_io_site(m, 'r');
         if (fio_r) {
             // residual folded into the convs2 epilogue: out = conv + bias + h
             h = conv1d_same(ctx, m, ctype, pre, xt, 1, 0.0f, h);
@@ -423,9 +428,10 @@ void hifigan_run(const HifiganModel & m, const float * mel, const float * f0, in
     // new-format GGUFs carry phase-split sub-pixel upsample tensors
     const bool subpixel = gm.tensors.find("hifigan.upsub.0.weight") != gm.tensors.end();
 
+    const bool pre_direct = direct_conv_k_ok(gm, ctype, gguf_get(gm, "hifigan.conv_pre.weight")->ne[0]);
+    const bool p_folded = pre_direct ? fused_site_conv(gm, 'p') : fused_site(gm, 'p');
     ggml_tensor * x = conv1d_same(ctx, gm, ctype, "hifigan.conv_pre", mel_in, 1,
-                                  (use_direct_conv(gm, ctype) ? fused_site_conv(gm, 'p')
-                                                              : fused_site(gm, 'p')) ? 0.1f : 0.0f);
+                                p_folded ? 0.1f : 0.0f);
     const int num_kernels = (int) m.resblock_kernels.size();
     const float mean_scale = 1.0f / (float) num_kernels;
     const bool fio   = use_fuse_io(gm, ctype);
@@ -437,8 +443,6 @@ void hifigan_run(const HifiganModel & m, const float * mel, const float * f0, in
         // leaky fold into this level's upsub conv X-pad (in_scale/in_slope);
         // on the fallback path (or per-site bisect) they stay explicit nodes.
         // i==0's leaky was already fused into conv_pre's bias add instead.
-        const bool p_folded = use_direct_conv(gm, ctype) ? fused_site_conv(gm, 'p')
-                                                         : fused_site(gm, 'p');
         const bool need_leaky = (i > 0 || !p_folded);
         const bool need_scale = (i > 0);
         if (need_scale && !fio_s) x = ggml_scale(ctx, x, mean_scale);

@@ -61,8 +61,11 @@ if(DEFINED ENV{PCNSF_MODEL_GGUF})
         PCNSF_MODEL_GGUF="$ENV{PCNSF_MODEL_GGUF}" PCNSF_GOLDEN_DIR="${PCNSF_GOLDEN_DIR}")
     add_test(NAME t05_vocode COMMAND test_vocode)
     add_test(NAME t05_vocode_f16_forced COMMAND test_vocode F16)
+    add_test(NAME t05_vocode_kernel_fallback COMMAND test_vocode F32 compare-min-k)
     set_tests_properties(t05_vocode PROPERTIES
         FIXTURES_REQUIRED golden LABELS "e2e" ENVIRONMENT "PCNSF_BACKEND=cpu")
     set_tests_properties(t05_vocode_f16_forced PROPERTIES FIXTURES_REQUIRED golden LABELS "e2e"
         ENVIRONMENT "PCNSF_BACKEND=cpu;PCNSF_DIRECT_CONV=1;PCNSF_FUSE_IO=1")
+    set_tests_properties(t05_vocode_kernel_fallback PROPERTIES FIXTURES_REQUIRED golden LABELS "e2e"
+        ENVIRONMENT "PCNSF_BACKEND=cpu;PCNSF_DIRECT_CONV=1;PCNSF_FUSE_IO=1;PCNSF_DIRECT_MIN_K=1")
 endif()
